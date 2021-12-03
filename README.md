@@ -75,7 +75,6 @@ The model's performance is measured using the standard COCO Panoptic Evaluator, 
 │   └── Panoptic_MapAnything_PLR_Lab_Report.pdf
 ├── LICENSE
 └── README.md
-```
 
 ## Acknowledgement
 
