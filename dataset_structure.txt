@@ -1,0 +1,345 @@
+(robot_lab) [sairamm_hpc@sgpu002 scannet]$ cd scannetpp/
+(robot_lab) [sairamm_hpc@sgpu002 scannetpp]$ ls
+data  metadata  panoptic  panoptic_annotations  panoptic_annotations_val  panoptic_val  rasterization  splits
+(robot_lab) [sairamm_hpc@sgpu002 scannetpp]$ cd panoptic_annotations
+(robot_lab) [sairamm_hpc@sgpu002 panoptic_annotations]$ ks
+bash: ks: command not found
+(robot_lab) [sairamm_hpc@sgpu002 panoptic_annotations]$ ls
+img_bbox   img_crops_mask  obj_ids     obj_pcs    semantics_viz  viz_obj_ids
+img_crops  img_crops_nobg  obj_meshes  semantics  undistorted    viz_obj_ids_txt
+(robot_lab) [sairamm_hpc@sgpu002 panoptic_annotations]$ cd undistorted/
+(robot_lab) [sairamm_hpc@sgpu002 undistorted]$ ls
+(robot_lab) [sairamm_hpc@sgpu002 undistorted]$ cd ..
+(robot_lab) [sairamm_hpc@sgpu002 panoptic_annotations]$ ls
+img_bbox   img_crops_mask  obj_ids     obj_pcs    semantics_viz  viz_obj_ids
+img_crops  img_crops_nobg  obj_meshes  semantics  undistorted    viz_obj_ids_txt
+(robot_lab) [sairamm_hpc@sgpu002 panoptic_annotations]$ tree
+bash: tree: command not found
+(robot_lab) [sairamm_hpc@sgpu002 panoptic_annotations]$ cd semantics
+(robot_lab) [sairamm_hpc@sgpu002 semantics]$ ls
+036bce3393  0d41f3a279  1f7cbbdde1  302a7f6b67  45d2e33be1  5a269ba6fe  7e09430da7  8b2c0938d6  a29cccc784  bc2fce1d81  ccfd3ed9c7  ed2216380b
+076c822ecc  104acbf7d2  210f741378  30966f4c6e  47b37eb6f9  5d152fab1b  7e7cd69a59  8b5caf3398  aaa11940d3  bc400d86e1  d2f44bf242  ef18cf0708
+079a326597  108ec0b806  25927bb04c  30f4a2b44d  480ddaadc0  61adeff7d5  7eac902fd5  8be0cd3817  ab046f8faf  bd9305480d  d415cc449b  ef69d58016
+07f5b601ee  116456116b  25aa952aa3  324d07a5b3  4a1a3a7dc5  646af5e14b  7f77abce34  8d563fc2cc  ab6983ae6c  be0ed6b33c  d6702c681d  f07340dfea
+07ff1c45bb  1204e08f17  260db9cf5a  37ea1c52f0  4ba22fa7e4  66c98f4a9b  80ffca8a48  8e00ac7f59  acd69a1746  bfd3fd54d2  dfac5b38df  f248c2bcdc
+08bbbdcc3d  1366d5ae89  260fa55d50  3928249b53  4c5c60fa76  67d702f2e8  8133208cb6  9471b8d485  ad2d07fd11  c06a983e63  e0abd740ba  f25f5e6f63
+09bced689e  16c9bd2e1e  281bc17764  394a542a19  50809ea0d8  689fec23d7  824d9cfa6e  94ee15e8ba  ada5304e41  c0c863b72d  e0de253456  f34d532901
+0a184cf634  1a130d092a  28a9ee4557  39e6ee46df  52599ae063  69e5939669  85251de7d1  98b4ec142f  b1d75ecd55  c0f5742640  e1b1d9de55  f8062cb7ce
+0a5c013435  1a8e0d78c0  290ef3f2c9  39f36da05b  546292a9db  6cc2231b9c  87f6d7d564  98fe276aa8  b20a261fdf  c173f62b15  e7ac609391  f8f12e4e6b
+0a7cc12c0e  1ae9e5d2a6  2970e95b65  40b56bf310  55b2bf8036  6d89a7320d  88627b561e  9f79564dbf  b73f5cdc41  c856c41c99  e898c76c1f  fb564c935d
+0b031f3119  1b75758486  2b1dc6d6a5  41b00feddb  56a0ec536c  7079b59642  88cf747085  a08dda47a8  b97261909e  c8f2218ee2  e8e81396b6  fd361ab85f
+0c5385e84b  1b9692f0c7  2e74812d00  4422722c49  59e3f1ea37  712dc47104  893fb90e89  a1d9da703c  bb87c292ad  c9abde4c4b  e8ea9b4da8  fe1733741f
+(robot_lab) [sairamm_hpc@sgpu002 semantics]$ cd 546292a9db/
+(robot_lab) [sairamm_hpc@sgpu002 546292a9db]$ ls
+DSC06905.JPG.png  DSC06938.JPG.png  DSC06971.JPG.png  DSC07004.JPG.png  DSC07040.JPG.png  DSC07073.JPG.png  DSC07106.JPG.png  DSC07164.JPG.png
+DSC06906.JPG.png  DSC06939.JPG.png  DSC06972.JPG.png  DSC07005.JPG.png  DSC07041.JPG.png  DSC07074.JPG.png  DSC07107.JPG.png  DSC07165.JPG.png
+DSC06907.JPG.png  DSC06940.JPG.png  DSC06973.JPG.png  DSC07006.JPG.png  DSC07042.JPG.png  DSC07075.JPG.png  DSC07108.JPG.png  DSC07173.JPG.png
+DSC06908.JPG.png  DSC06941.JPG.png  DSC06974.JPG.png  DSC07007.JPG.png  DSC07043.JPG.png  DSC07076.JPG.png  DSC07109.JPG.png  DSC07174.JPG.png
+DSC06909.JPG.png  DSC06942.JPG.png  DSC06975.JPG.png  DSC07008.JPG.png  DSC07044.JPG.png  DSC07077.JPG.png  DSC07110.JPG.png  DSC07175.JPG.png
+DSC06910.JPG.png  DSC06943.JPG.png  DSC06976.JPG.png  DSC07009.JPG.png  DSC07045.JPG.png  DSC07078.JPG.png  DSC07111.JPG.png  DSC07176.JPG.png
+DSC06911.JPG.png  DSC06944.JPG.png  DSC06977.JPG.png  DSC07010.JPG.png  DSC07046.JPG.png  DSC07079.JPG.png  DSC07112.JPG.png  DSC07177.JPG.png
+DSC06912.JPG.png  DSC06945.JPG.png  DSC06978.JPG.png  DSC07011.JPG.png  DSC07047.JPG.png  DSC07080.JPG.png  DSC07113.JPG.png  DSC07178.JPG.png
+DSC06913.JPG.png  DSC06946.JPG.png  DSC06979.JPG.png  DSC07012.JPG.png  DSC07048.JPG.png  DSC07081.JPG.png  DSC07114.JPG.png  DSC07193.JPG.png
+DSC06914.JPG.png  DSC06947.JPG.png  DSC06980.JPG.png  DSC07013.JPG.png  DSC07049.JPG.png  DSC07082.JPG.png  DSC07115.JPG.png  DSC07194.JPG.png
+DSC06915.JPG.png  DSC06948.JPG.png  DSC06981.JPG.png  DSC07014.JPG.png  DSC07050.JPG.png  DSC07083.JPG.png  DSC07116.JPG.png  DSC07195.JPG.png
+DSC06916.JPG.png  DSC06949.JPG.png  DSC06982.JPG.png  DSC07015.JPG.png  DSC07051.JPG.png  DSC07084.JPG.png  DSC07117.JPG.png  DSC07196.JPG.png
+DSC06917.JPG.png  DSC06950.JPG.png  DSC06983.JPG.png  DSC07016.JPG.png  DSC07052.JPG.png  DSC07085.JPG.png  DSC07118.JPG.png  DSC07197.JPG.png
+DSC06918.JPG.png  DSC06951.JPG.png  DSC06984.JPG.png  DSC07017.JPG.png  DSC07053.JPG.png  DSC07086.JPG.png  DSC07119.JPG.png  DSC07198.JPG.png
+DSC06919.JPG.png  DSC06952.JPG.png  DSC06985.JPG.png  DSC07018.JPG.png  DSC07054.JPG.png  DSC07087.JPG.png  DSC07120.JPG.png  DSC07199.JPG.png
+DSC06920.JPG.png  DSC06953.JPG.png  DSC06986.JPG.png  DSC07019.JPG.png  DSC07055.JPG.png  DSC07088.JPG.png  DSC07121.JPG.png  DSC07200.JPG.png
+DSC06921.JPG.png  DSC06954.JPG.png  DSC06987.JPG.png  DSC07020.JPG.png  DSC07056.JPG.png  DSC07089.JPG.png  DSC07122.JPG.png  DSC07201.JPG.png
+DSC06922.JPG.png  DSC06955.JPG.png  DSC06988.JPG.png  DSC07021.JPG.png  DSC07057.JPG.png  DSC07090.JPG.png  DSC07123.JPG.png  DSC07202.JPG.png
+DSC06923.JPG.png  DSC06956.JPG.png  DSC06989.JPG.png  DSC07022.JPG.png  DSC07058.JPG.png  DSC07091.JPG.png  DSC07124.JPG.png  DSC07205.JPG.png
+DSC06924.JPG.png  DSC06957.JPG.png  DSC06990.JPG.png  DSC07023.JPG.png  DSC07059.JPG.png  DSC07092.JPG.png  DSC07125.JPG.png  DSC07206.JPG.png
+DSC06925.JPG.png  DSC06958.JPG.png  DSC06991.JPG.png  DSC07024.JPG.png  DSC07060.JPG.png  DSC07093.JPG.png  DSC07126.JPG.png  DSC07207.JPG.png
+DSC06926.JPG.png  DSC06959.JPG.png  DSC06992.JPG.png  DSC07025.JPG.png  DSC07061.JPG.png  DSC07094.JPG.png  DSC07127.JPG.png  DSC07208.JPG.png
+DSC06927.JPG.png  DSC06960.JPG.png  DSC06993.JPG.png  DSC07026.JPG.png  DSC07062.JPG.png  DSC07095.JPG.png  DSC07128.JPG.png  DSC07209.JPG.png
+DSC06928.JPG.png  DSC06961.JPG.png  DSC06994.JPG.png  DSC07027.JPG.png  DSC07063.JPG.png  DSC07096.JPG.png  DSC07129.JPG.png  DSC07210.JPG.png
+DSC06929.JPG.png  DSC06962.JPG.png  DSC06995.JPG.png  DSC07028.JPG.png  DSC07064.JPG.png  DSC07097.JPG.png  DSC07130.JPG.png  DSC07211.JPG.png
+DSC06930.JPG.png  DSC06963.JPG.png  DSC06996.JPG.png  DSC07029.JPG.png  DSC07065.JPG.png  DSC07098.JPG.png  DSC07156.JPG.png  DSC07212.JPG.png
+DSC06931.JPG.png  DSC06964.JPG.png  DSC06997.JPG.png  DSC07030.JPG.png  DSC07066.JPG.png  DSC07099.JPG.png  DSC07157.JPG.png  DSC07213.JPG.png
+DSC06932.JPG.png  DSC06965.JPG.png  DSC06998.JPG.png  DSC07031.JPG.png  DSC07067.JPG.png  DSC07100.JPG.png  DSC07158.JPG.png  DSC07215.JPG.png
+DSC06933.JPG.png  DSC06966.JPG.png  DSC06999.JPG.png  DSC07035.JPG.png  DSC07068.JPG.png  DSC07101.JPG.png  DSC07159.JPG.png  DSC07216.JPG.png
+DSC06934.JPG.png  DSC06967.JPG.png  DSC07000.JPG.png  DSC07036.JPG.png  DSC07069.JPG.png  DSC07102.JPG.png  DSC07160.JPG.png
+DSC06935.JPG.png  DSC06968.JPG.png  DSC07001.JPG.png  DSC07037.JPG.png  DSC07070.JPG.png  DSC07103.JPG.png  DSC07161.JPG.png
+DSC06936.JPG.png  DSC06969.JPG.png  DSC07002.JPG.png  DSC07038.JPG.png  DSC07071.JPG.png  DSC07104.JPG.png  DSC07162.JPG.png
+DSC06937.JPG.png  DSC06970.JPG.png  DSC07003.JPG.png  DSC07039.JPG.png  DSC07072.JPG.png  DSC07105.JPG.png  DSC07163.JPG.png
+(robot_lab) [sairamm_hpc@sgpu002 546292a9db]$ cd ..
+(robot_lab) [sairamm_hpc@sgpu002 semantics]$ ls
+036bce3393  0d41f3a279  1f7cbbdde1  302a7f6b67  45d2e33be1  5a269ba6fe  7e09430da7  8b2c0938d6  a29cccc784  bc2fce1d81  ccfd3ed9c7  ed2216380b
+076c822ecc  104acbf7d2  210f741378  30966f4c6e  47b37eb6f9  5d152fab1b  7e7cd69a59  8b5caf3398  aaa11940d3  bc400d86e1  d2f44bf242  ef18cf0708
+079a326597  108ec0b806  25927bb04c  30f4a2b44d  480ddaadc0  61adeff7d5  7eac902fd5  8be0cd3817  ab046f8faf  bd9305480d  d415cc449b  ef69d58016
+07f5b601ee  116456116b  25aa952aa3  324d07a5b3  4a1a3a7dc5  646af5e14b  7f77abce34  8d563fc2cc  ab6983ae6c  be0ed6b33c  d6702c681d  f07340dfea
+07ff1c45bb  1204e08f17  260db9cf5a  37ea1c52f0  4ba22fa7e4  66c98f4a9b  80ffca8a48  8e00ac7f59  acd69a1746  bfd3fd54d2  dfac5b38df  f248c2bcdc
+08bbbdcc3d  1366d5ae89  260fa55d50  3928249b53  4c5c60fa76  67d702f2e8  8133208cb6  9471b8d485  ad2d07fd11  c06a983e63  e0abd740ba  f25f5e6f63
+09bced689e  16c9bd2e1e  281bc17764  394a542a19  50809ea0d8  689fec23d7  824d9cfa6e  94ee15e8ba  ada5304e41  c0c863b72d  e0de253456  f34d532901
+0a184cf634  1a130d092a  28a9ee4557  39e6ee46df  52599ae063  69e5939669  85251de7d1  98b4ec142f  b1d75ecd55  c0f5742640  e1b1d9de55  f8062cb7ce
+0a5c013435  1a8e0d78c0  290ef3f2c9  39f36da05b  546292a9db  6cc2231b9c  87f6d7d564  98fe276aa8  b20a261fdf  c173f62b15  e7ac609391  f8f12e4e6b
+0a7cc12c0e  1ae9e5d2a6  2970e95b65  40b56bf310  55b2bf8036  6d89a7320d  88627b561e  9f79564dbf  b73f5cdc41  c856c41c99  e898c76c1f  fb564c935d
+0b031f3119  1b75758486  2b1dc6d6a5  41b00feddb  56a0ec536c  7079b59642  88cf747085  a08dda47a8  b97261909e  c8f2218ee2  e8e81396b6  fd361ab85f
+0c5385e84b  1b9692f0c7  2e74812d00  4422722c49  59e3f1ea37  712dc47104  893fb90e89  a1d9da703c  bb87c292ad  c9abde4c4b  e8ea9b4da8  fe1733741f
+(robot_lab) [sairamm_hpc@sgpu002 semantics]$ cd ..
+(robot_lab) [sairamm_hpc@sgpu002 panoptic_annotations]$ ls
+img_bbox   img_crops_mask  obj_ids     obj_pcs    semantics_viz  viz_obj_ids
+img_crops  img_crops_nobg  obj_meshes  semantics  undistorted    viz_obj_ids_txt
+(robot_lab) [sairamm_hpc@sgpu002 panoptic_annotations]$ cd ..
+(robot_lab) [sairamm_hpc@sgpu002 scannetpp]$ ls
+data  metadata  panoptic  panoptic_annotations  panoptic_annotations_val  panoptic_val  rasterization  splits
+(robot_lab) [sairamm_hpc@sgpu002 scannetpp]$ cd panoptic
+panoptic/                 panoptic_annotations/     panoptic_annotations_val/ panoptic_val/             
+(robot_lab) [sairamm_hpc@sgpu002 scannetpp]$ cd panoptic/
+(robot_lab) [sairamm_hpc@sgpu002 panoptic]$ ls
+036bce3393  0d41f3a279  1f7cbbdde1  302a7f6b67  45d2e33be1  5a269ba6fe  7e09430da7  8b2c0938d6  a29cccc784  bc2fce1d81  ccfd3ed9c7  ed2216380b
+076c822ecc  104acbf7d2  210f741378  30966f4c6e  47b37eb6f9  5d152fab1b  7e7cd69a59  8b5caf3398  aaa11940d3  bc400d86e1  d2f44bf242  ef18cf0708
+079a326597  108ec0b806  25927bb04c  30f4a2b44d  480ddaadc0  61adeff7d5  7eac902fd5  8be0cd3817  ab046f8faf  bd9305480d  d415cc449b  ef69d58016
+07f5b601ee  116456116b  25aa952aa3  324d07a5b3  4a1a3a7dc5  646af5e14b  7f77abce34  8d563fc2cc  ab6983ae6c  be0ed6b33c  d6702c681d  f07340dfea
+07ff1c45bb  1204e08f17  260db9cf5a  37ea1c52f0  4ba22fa7e4  66c98f4a9b  80ffca8a48  8e00ac7f59  acd69a1746  bfd3fd54d2  dfac5b38df  f248c2bcdc
+08bbbdcc3d  1366d5ae89  260fa55d50  3928249b53  4c5c60fa76  67d702f2e8  8133208cb6  9471b8d485  ad2d07fd11  c06a983e63  e0abd740ba  f25f5e6f63
+09bced689e  16c9bd2e1e  281bc17764  394a542a19  50809ea0d8  689fec23d7  824d9cfa6e  94ee15e8ba  ada5304e41  c0c863b72d  e0de253456  f34d532901
+0a184cf634  1a130d092a  28a9ee4557  39e6ee46df  52599ae063  69e5939669  85251de7d1  98b4ec142f  b1d75ecd55  c0f5742640  e1b1d9de55  f8062cb7ce
+0a5c013435  1a8e0d78c0  290ef3f2c9  39f36da05b  546292a9db  6cc2231b9c  87f6d7d564  98fe276aa8  b20a261fdf  c173f62b15  e7ac609391  f8f12e4e6b
+0a7cc12c0e  1ae9e5d2a6  2970e95b65  40b56bf310  55b2bf8036  6d89a7320d  88627b561e  9f79564dbf  b73f5cdc41  c856c41c99  e898c76c1f  fb564c935d
+0b031f3119  1b75758486  2b1dc6d6a5  41b00feddb  56a0ec536c  7079b59642  88cf747085  a08dda47a8  b97261909e  c8f2218ee2  e8e81396b6  fd361ab85f
+0c5385e84b  1b9692f0c7  2e74812d00  4422722c49  59e3f1ea37  712dc47104  893fb90e89  a1d9da703c  bb87c292ad  c9abde4c4b  e8ea9b4da8  fe1733741f
+(robot_lab) [sairamm_hpc@sgpu002 panoptic]$ cd 
+Display all 144 possibilities? (y or n)
+(robot_lab) [sairamm_hpc@sgpu002 panoptic]$ cd 59e3f1ea37/
+(robot_lab) [sairamm_hpc@sgpu002 59e3f1ea37]$ ls
+DSC00002.json  DSC00043.json  DSC00084.json  DSC00125.json  DSC00166.json  DSC00208.json  DSC09881.json  DSC09922.json  DSC09963.json
+DSC00002.png   DSC00043.png   DSC00084.png   DSC00125.png   DSC00166.png   DSC00208.png   DSC09881.png   DSC09922.png   DSC09963.png
+DSC00003.json  DSC00044.json  DSC00085.json  DSC00126.json  DSC00167.json  DSC00209.json  DSC09882.json  DSC09923.json  DSC09964.json
+DSC00003.png   DSC00044.png   DSC00085.png   DSC00126.png   DSC00167.png   DSC00209.png   DSC09882.png   DSC09923.png   DSC09964.png
+DSC00004.json  DSC00045.json  DSC00086.json  DSC00127.json  DSC00168.json  DSC00210.json  DSC09883.json  DSC09924.json  DSC09965.json
+DSC00004.png   DSC00045.png   DSC00086.png   DSC00127.png   DSC00168.png   DSC00210.png   DSC09883.png   DSC09924.png   DSC09965.png
+DSC00005.json  DSC00046.json  DSC00087.json  DSC00128.json  DSC00169.json  DSC00211.json  DSC09884.json  DSC09925.json  DSC09966.json
+DSC00005.png   DSC00046.png   DSC00087.png   DSC00128.png   DSC00169.png   DSC00211.png   DSC09884.png   DSC09925.png   DSC09966.png
+DSC00006.json  DSC00047.json  DSC00088.json  DSC00129.json  DSC00170.json  DSC00212.json  DSC09885.json  DSC09926.json  DSC09967.json
+DSC00006.png   DSC00047.png   DSC00088.png   DSC00129.png   DSC00170.png   DSC00212.png   DSC09885.png   DSC09926.png   DSC09967.png
+DSC00007.json  DSC00048.json  DSC00089.json  DSC00130.json  DSC00171.json  DSC00213.json  DSC09886.json  DSC09927.json  DSC09968.json
+DSC00007.png   DSC00048.png   DSC00089.png   DSC00130.png   DSC00171.png   DSC00213.png   DSC09886.png   DSC09927.png   DSC09968.png
+DSC00008.json  DSC00049.json  DSC00090.json  DSC00131.json  DSC00172.json  DSC00214.json  DSC09887.json  DSC09928.json  DSC09969.json
+DSC00008.png   DSC00049.png   DSC00090.png   DSC00131.png   DSC00172.png   DSC00214.png   DSC09887.png   DSC09928.png   DSC09969.png
+DSC00009.json  DSC00050.json  DSC00091.json  DSC00132.json  DSC00173.json  DSC00215.json  DSC09888.json  DSC09929.json  DSC09970.json
+DSC00009.png   DSC00050.png   DSC00091.png   DSC00132.png   DSC00173.png   DSC00215.png   DSC09888.png   DSC09929.png   DSC09970.png
+DSC00010.json  DSC00051.json  DSC00092.json  DSC00133.json  DSC00174.json  DSC00216.json  DSC09889.json  DSC09930.json  DSC09971.json
+DSC00010.png   DSC00051.png   DSC00092.png   DSC00133.png   DSC00174.png   DSC00216.png   DSC09889.png   DSC09930.png   DSC09971.png
+DSC00011.json  DSC00052.json  DSC00093.json  DSC00134.json  DSC00175.json  DSC00217.json  DSC09890.json  DSC09931.json  DSC09972.json
+DSC00011.png   DSC00052.png   DSC00093.png   DSC00134.png   DSC00175.png   DSC00217.png   DSC09890.png   DSC09931.png   DSC09972.png
+DSC00012.json  DSC00053.json  DSC00094.json  DSC00135.json  DSC00176.json  DSC00218.json  DSC09891.json  DSC09932.json  DSC09973.json
+DSC00012.png   DSC00053.png   DSC00094.png   DSC00135.png   DSC00176.png   DSC00218.png   DSC09891.png   DSC09932.png   DSC09973.png
+DSC00013.json  DSC00054.json  DSC00095.json  DSC00136.json  DSC00177.json  DSC00219.json  DSC09892.json  DSC09933.json  DSC09974.json
+DSC00013.png   DSC00054.png   DSC00095.png   DSC00136.png   DSC00177.png   DSC00219.png   DSC09892.png   DSC09933.png   DSC09974.png
+DSC00014.json  DSC00055.json  DSC00096.json  DSC00137.json  DSC00178.json  DSC09852.json  DSC09893.json  DSC09934.json  DSC09975.json
+DSC00014.png   DSC00055.png   DSC00096.png   DSC00137.png   DSC00178.png   DSC09852.png   DSC09893.png   DSC09934.png   DSC09975.png
+DSC00015.json  DSC00056.json  DSC00097.json  DSC00138.json  DSC00179.json  DSC09853.json  DSC09894.json  DSC09935.json  DSC09976.json
+DSC00015.png   DSC00056.png   DSC00097.png   DSC00138.png   DSC00179.png   DSC09853.png   DSC09894.png   DSC09935.png   DSC09976.png
+DSC00016.json  DSC00057.json  DSC00098.json  DSC00139.json  DSC00180.json  DSC09854.json  DSC09895.json  DSC09936.json  DSC09977.json
+DSC00016.png   DSC00057.png   DSC00098.png   DSC00139.png   DSC00180.png   DSC09854.png   DSC09895.png   DSC09936.png   DSC09977.png
+DSC00017.json  DSC00058.json  DSC00099.json  DSC00140.json  DSC00181.json  DSC09855.json  DSC09896.json  DSC09937.json  DSC09978.json
+DSC00017.png   DSC00058.png   DSC00099.png   DSC00140.png   DSC00181.png   DSC09855.png   DSC09896.png   DSC09937.png   DSC09978.png
+DSC00018.json  DSC00059.json  DSC00100.json  DSC00141.json  DSC00182.json  DSC09856.json  DSC09897.json  DSC09938.json  DSC09979.json
+DSC00018.png   DSC00059.png   DSC00100.png   DSC00141.png   DSC00182.png   DSC09856.png   DSC09897.png   DSC09938.png   DSC09979.png
+DSC00019.json  DSC00060.json  DSC00101.json  DSC00142.json  DSC00183.json  DSC09857.json  DSC09898.json  DSC09939.json  DSC09980.json
+DSC00019.png   DSC00060.png   DSC00101.png   DSC00142.png   DSC00183.png   DSC09857.png   DSC09898.png   DSC09939.png   DSC09980.png
+DSC00020.json  DSC00061.json  DSC00102.json  DSC00143.json  DSC00184.json  DSC09858.json  DSC09899.json  DSC09940.json  DSC09981.json
+DSC00020.png   DSC00061.png   DSC00102.png   DSC00143.png   DSC00184.png   DSC09858.png   DSC09899.png   DSC09940.png   DSC09981.png
+DSC00021.json  DSC00062.json  DSC00103.json  DSC00144.json  DSC00185.json  DSC09859.json  DSC09900.json  DSC09941.json  DSC09982.json
+DSC00021.png   DSC00062.png   DSC00103.png   DSC00144.png   DSC00185.png   DSC09859.png   DSC09900.png   DSC09941.png   DSC09982.png
+DSC00022.json  DSC00063.json  DSC00104.json  DSC00145.json  DSC00186.json  DSC09860.json  DSC09901.json  DSC09942.json  DSC09983.json
+DSC00022.png   DSC00063.png   DSC00104.png   DSC00145.png   DSC00186.png   DSC09860.png   DSC09901.png   DSC09942.png   DSC09983.png
+DSC00023.json  DSC00064.json  DSC00105.json  DSC00146.json  DSC00187.json  DSC09861.json  DSC09902.json  DSC09943.json  DSC09984.json
+DSC00023.png   DSC00064.png   DSC00105.png   DSC00146.png   DSC00187.png   DSC09861.png   DSC09902.png   DSC09943.png   DSC09984.png
+DSC00024.json  DSC00065.json  DSC00106.json  DSC00147.json  DSC00188.json  DSC09862.json  DSC09903.json  DSC09944.json  DSC09985.json
+DSC00024.png   DSC00065.png   DSC00106.png   DSC00147.png   DSC00188.png   DSC09862.png   DSC09903.png   DSC09944.png   DSC09985.png
+DSC00025.json  DSC00066.json  DSC00107.json  DSC00148.json  DSC00189.json  DSC09863.json  DSC09904.json  DSC09945.json  DSC09986.json
+DSC00025.png   DSC00066.png   DSC00107.png   DSC00148.png   DSC00189.png   DSC09863.png   DSC09904.png   DSC09945.png   DSC09986.png
+DSC00026.json  DSC00067.json  DSC00108.json  DSC00149.json  DSC00190.json  DSC09864.json  DSC09905.json  DSC09946.json  DSC09987.json
+DSC00026.png   DSC00067.png   DSC00108.png   DSC00149.png   DSC00190.png   DSC09864.png   DSC09905.png   DSC09946.png   DSC09987.png
+DSC00027.json  DSC00068.json  DSC00109.json  DSC00150.json  DSC00191.json  DSC09865.json  DSC09906.json  DSC09947.json  DSC09988.json
+DSC00027.png   DSC00068.png   DSC00109.png   DSC00150.png   DSC00191.png   DSC09865.png   DSC09906.png   DSC09947.png   DSC09988.png
+DSC00028.json  DSC00069.json  DSC00110.json  DSC00151.json  DSC00192.json  DSC09866.json  DSC09907.json  DSC09948.json  DSC09989.json
+DSC00028.png   DSC00069.png   DSC00110.png   DSC00151.png   DSC00192.png   DSC09866.png   DSC09907.png   DSC09948.png   DSC09989.png
+DSC00029.json  DSC00070.json  DSC00111.json  DSC00152.json  DSC00193.json  DSC09867.json  DSC09908.json  DSC09949.json  DSC09990.json
+DSC00029.png   DSC00070.png   DSC00111.png   DSC00152.png   DSC00193.png   DSC09867.png   DSC09908.png   DSC09949.png   DSC09990.png
+DSC00030.json  DSC00071.json  DSC00112.json  DSC00153.json  DSC00194.json  DSC09868.json  DSC09909.json  DSC09950.json  DSC09991.json
+DSC00030.png   DSC00071.png   DSC00112.png   DSC00153.png   DSC00194.png   DSC09868.png   DSC09909.png   DSC09950.png   DSC09991.png
+DSC00031.json  DSC00072.json  DSC00113.json  DSC00154.json  DSC00195.json  DSC09869.json  DSC09910.json  DSC09951.json  DSC09992.json
+DSC00031.png   DSC00072.png   DSC00113.png   DSC00154.png   DSC00195.png   DSC09869.png   DSC09910.png   DSC09951.png   DSC09992.png
+DSC00032.json  DSC00073.json  DSC00114.json  DSC00155.json  DSC00196.json  DSC09870.json  DSC09911.json  DSC09952.json  DSC09993.json
+DSC00032.png   DSC00073.png   DSC00114.png   DSC00155.png   DSC00196.png   DSC09870.png   DSC09911.png   DSC09952.png   DSC09993.png
+DSC00033.json  DSC00074.json  DSC00115.json  DSC00156.json  DSC00197.json  DSC09871.json  DSC09912.json  DSC09953.json  DSC09994.json
+DSC00033.png   DSC00074.png   DSC00115.png   DSC00156.png   DSC00197.png   DSC09871.png   DSC09912.png   DSC09953.png   DSC09994.png
+DSC00034.json  DSC00075.json  DSC00116.json  DSC00157.json  DSC00198.json  DSC09872.json  DSC09913.json  DSC09954.json  DSC09995.json
+DSC00034.png   DSC00075.png   DSC00116.png   DSC00157.png   DSC00198.png   DSC09872.png   DSC09913.png   DSC09954.png   DSC09995.png
+DSC00035.json  DSC00076.json  DSC00117.json  DSC00158.json  DSC00199.json  DSC09873.json  DSC09914.json  DSC09955.json  DSC09996.json
+DSC00035.png   DSC00076.png   DSC00117.png   DSC00158.png   DSC00199.png   DSC09873.png   DSC09914.png   DSC09955.png   DSC09996.png
+DSC00036.json  DSC00077.json  DSC00118.json  DSC00159.json  DSC00200.json  DSC09874.json  DSC09915.json  DSC09956.json  DSC09997.json
+DSC00036.png   DSC00077.png   DSC00118.png   DSC00159.png   DSC00200.png   DSC09874.png   DSC09915.png   DSC09956.png   DSC09997.png
+DSC00037.json  DSC00078.json  DSC00119.json  DSC00160.json  DSC00201.json  DSC09875.json  DSC09916.json  DSC09957.json  DSC09998.json
+DSC00037.png   DSC00078.png   DSC00119.png   DSC00160.png   DSC00201.png   DSC09875.png   DSC09916.png   DSC09957.png   DSC09998.png
+DSC00038.json  DSC00079.json  DSC00120.json  DSC00161.json  DSC00202.json  DSC09876.json  DSC09917.json  DSC09958.json  DSC09999.json
+DSC00038.png   DSC00079.png   DSC00120.png   DSC00161.png   DSC00202.png   DSC09876.png   DSC09917.png   DSC09958.png   DSC09999.png
+DSC00039.json  DSC00080.json  DSC00121.json  DSC00162.json  DSC00204.json  DSC09877.json  DSC09918.json  DSC09959.json
+DSC00039.png   DSC00080.png   DSC00121.png   DSC00162.png   DSC00204.png   DSC09877.png   DSC09918.png   DSC09959.png
+DSC00040.json  DSC00081.json  DSC00122.json  DSC00163.json  DSC00205.json  DSC09878.json  DSC09919.json  DSC09960.json
+DSC00040.png   DSC00081.png   DSC00122.png   DSC00163.png   DSC00205.png   DSC09878.png   DSC09919.png   DSC09960.png
+DSC00041.json  DSC00082.json  DSC00123.json  DSC00164.json  DSC00206.json  DSC09879.json  DSC09920.json  DSC09961.json
+DSC00041.png   DSC00082.png   DSC00123.png   DSC00164.png   DSC00206.png   DSC09879.png   DSC09920.png   DSC09961.png
+DSC00042.json  DSC00083.json  DSC00124.json  DSC00165.json  DSC00207.json  DSC09880.json  DSC09921.json  DSC09962.json
+DSC00042.png   DSC00083.png   DSC00124.png   DSC00165.png   DSC00207.png   DSC09880.png   DSC09921.png   DSC09962.png
+(robot_lab) [sairamm_hpc@sgpu002 59e3f1ea37]$ cat DSC0
+Display all 730 possibilities? (y or n)^C
+(robot_lab) [sairamm_hpc@sgpu002 59e3f1ea37]$ cd ..
+(robot_lab) [sairamm_hpc@sgpu002 panoptic]$ ls
+036bce3393  0d41f3a279  1f7cbbdde1  302a7f6b67  45d2e33be1  5a269ba6fe  7e09430da7  8b2c0938d6  a29cccc784  bc2fce1d81  ccfd3ed9c7  ed2216380b
+076c822ecc  104acbf7d2  210f741378  30966f4c6e  47b37eb6f9  5d152fab1b  7e7cd69a59  8b5caf3398  aaa11940d3  bc400d86e1  d2f44bf242  ef18cf0708
+079a326597  108ec0b806  25927bb04c  30f4a2b44d  480ddaadc0  61adeff7d5  7eac902fd5  8be0cd3817  ab046f8faf  bd9305480d  d415cc449b  ef69d58016
+07f5b601ee  116456116b  25aa952aa3  324d07a5b3  4a1a3a7dc5  646af5e14b  7f77abce34  8d563fc2cc  ab6983ae6c  be0ed6b33c  d6702c681d  f07340dfea
+07ff1c45bb  1204e08f17  260db9cf5a  37ea1c52f0  4ba22fa7e4  66c98f4a9b  80ffca8a48  8e00ac7f59  acd69a1746  bfd3fd54d2  dfac5b38df  f248c2bcdc
+08bbbdcc3d  1366d5ae89  260fa55d50  3928249b53  4c5c60fa76  67d702f2e8  8133208cb6  9471b8d485  ad2d07fd11  c06a983e63  e0abd740ba  f25f5e6f63
+09bced689e  16c9bd2e1e  281bc17764  394a542a19  50809ea0d8  689fec23d7  824d9cfa6e  94ee15e8ba  ada5304e41  c0c863b72d  e0de253456  f34d532901
+0a184cf634  1a130d092a  28a9ee4557  39e6ee46df  52599ae063  69e5939669  85251de7d1  98b4ec142f  b1d75ecd55  c0f5742640  e1b1d9de55  f8062cb7ce
+0a5c013435  1a8e0d78c0  290ef3f2c9  39f36da05b  546292a9db  6cc2231b9c  87f6d7d564  98fe276aa8  b20a261fdf  c173f62b15  e7ac609391  f8f12e4e6b
+0a7cc12c0e  1ae9e5d2a6  2970e95b65  40b56bf310  55b2bf8036  6d89a7320d  88627b561e  9f79564dbf  b73f5cdc41  c856c41c99  e898c76c1f  fb564c935d
+0b031f3119  1b75758486  2b1dc6d6a5  41b00feddb  56a0ec536c  7079b59642  88cf747085  a08dda47a8  b97261909e  c8f2218ee2  e8e81396b6  fd361ab85f
+0c5385e84b  1b9692f0c7  2e74812d00  4422722c49  59e3f1ea37  712dc47104  893fb90e89  a1d9da703c  bb87c292ad  c9abde4c4b  e8ea9b4da8  fe1733741f
+(robot_lab) [sairamm_hpc@sgpu002 panoptic]$ cd ..
+(robot_lab) [sairamm_hpc@sgpu002 scannetpp]$ cd metadata/
+(robot_lab) [sairamm_hpc@sgpu002 metadata]$ ls
+instance_classes.txt  scannetpp_semantic_palette.txt  scene_types.json  semantic_benchmark  semantic_classes.txt
+(robot_lab) [sairamm_hpc@sgpu002 metadata]$ 
+(robot_lab) [sairamm_hpc@sgpu002 metadata]$ 
+(robot_lab) [sairamm_hpc@sgpu002 metadata]$ cd ../data/
+(robot_lab) [sairamm_hpc@sgpu002 data]$ ls
+00777c41d4  120acffd90  27dc178a3d  3e7e4b07c4  5654092cc2  6da1d5ab04     8254184bfc  99fa5c25e1  aea84db0de  c3bc5e82c5  d807fb583b  ebff4de90b
+00a231a370  124974734e  281ba69af1  3e8bba0176  5656608266  6e420fd87a     825d228aec  9a9e32c768  aee88e3a93  c3e279be54  d82aaa88dc  ec2cb8dae1
+00dd871005  124a6e789b  281bc17764  3e928dc2f6  56669a70bc  6ea60e282a     8283161f1b  9ad3639fbe  af112b8903  c40466a844  d902931864  ec614d4e30
+01ce24e652  126d03d821  285efbc7cf  3e9a598891  569f99f881  6eb7f409ad     82bf847c8b  9b365a9b68  afd049e07c  c413b34238  d918af9c5f  ec9ff6051d
+020312de8d  12b2b1c6d9  286b55a2bf  3eba679830  56a0ec536c  6ebe30292e     82f448db76  9b74afd2d2  b068706ef0  c465f388d1  d986399f4c  ecb5d01065
+02455b3d20  12c0f7a7da  28a9ee4557  3ee9d33aef  5748ce6f01  6ee2fc1070     82ff39b7ef  9bfbc75700  b06bcddf42  c47168fab2  d9c781301e  ed2216380b
+0271889ec0  13285009a4  28fec555cd  3f15a9266d  578511c8a9  6ef2ac745a     836363121f  9c7b4394af  b074ca565a  c49a8c6cff  da1df716a5  edbf65c385
+027cd6ea0f  132cb783ed  290ef3f2c9  3f1e1610de  57d9fecae9  6f12492455     84b48f2614  9cfea269dd  b08a908f0f  c4aaedcfd1  da8043d54e  edced53026
+02a980c994  1366d5ae89  2970e95b65  3f6ee92fd7  58960ff105  6f1848d1e3     84d71cada6  9d7e20fbec  b09431c547  c4c04e6d6c  daffc70503  eea4ad9c04
+02c2ddee2a  13b4efaf62  29b18b8c4f  3ff873c77e  589f5c7c58  6ffdcc3022     85251de7d1  9d8fc94966  b09b119466  c4d4cb61f6  db02238cdf  eeddfe67f5
+02f25e5fee  13c3e046d7  29b607c6d5  40aec5fffa  58d446b708  7079b59642     85dc2702b7  9d8fcc4215  b0a08200c9  c4ed7b5ebe  db32da9b42  eee7eef8e5
+033d0b9343  151178afd7  29c7afafed  40b56bf310  58f6a5c5ec  70945f435a     867d97cf3d  9dc5ad040f  b0a6530a30  c50d2d1d42  db5293a870  eeeb9836b8
+036bce3393  15155a88fb  2a1a3afad9  410c470782  5942004064  709ab5bffe     871efc90fa  9e019d8be1  b0b004c40f  c5439f4607  dbd2a5961f  ef18cf0708
+0373d65cce  154c3e10d9  2a1b555966  4117a4f02c  59e3f1ea37  70f0e494b2     872268d1bf  9e9d017ad1  b0f057c684  c545851c4f  dbd97b5bca  ef25276c25
+03f7a0e617  15c4aa5bbb  2ab7bea148  413085a827  5a14f9da39  7104910700000  8737a0d1ad  9ed27ac522  b0fe0c610f  c5f701a8c7  dc204f59ae  ef60db4e8c
+0452249a1e  16c9bd2e1e  2b1dc6d6a5  419cbe7c11  5a269ba6fe  712b9ae775     87957b7c0b  9ee1527aa6  b119249da7  c601466b77  dc5f00843f  ef69d58016
+047fb766c4  17268bec90  2b5ef64cad  41b00feddb  5a9cdde1ba  712dc47104     87f6d7d564  9ef5fc6271  b1d75ecd55  c6c184cec0  dd636ce603  ef9428c5cd
+04c23ccd1d  1730c7d709  2b71155e0d  41eb967018  5aeac3800a  717485935      88627b561e  9ef704a38d  b20a261fdf  c6e247f6c3  dd685be466  f00bd5fa8a
+04d0dc245b  17a5e7d36c  2c7c10379b  4291be3b44  5b0a310211  724c40236c     8890d0a267  9f139a318d  b24697b3a1  c768a82cd0  de3c77cecd  f07340dfea
+04df8734b7  17c5e6a336  2d2e873aa0  4318f8bb3c  5b38982d25  725b8f0cba     88cf747085  9f21bdec45  b2632b738a  c842edbdf5  de5881aa12  f0b0a42ba3
+0529d56cce  182932a4f3  2d58610dce  4380e4646a  5bc6227191  728daff2a3     88f265fe25  9f7641ce94  b26e64c4b0  c856c41c99  de7dc9993f  f19ca0a52e
+052d72e137  1831b3823a  2e5c249de3  43cd995c51  5c21213f16  72f527a47c     891865308a  9f79564dbf  b37177e6c8  c8d099ecd8  de83a9c2d7  f1e01af60a
+053a94cf68  1841a0b525  2e67a32314  4422722c49  5c215ef3b0  734bd1a97e     89214f3ca0  a003a6585e  b37c033757  c8eeef6427  deb1867829  f1efd25854
+05d3c8c6f0  18fd041970  2e74812d00  4423a61d09  5d152fab1b  7357c3702a     893fb90e89  a05ee63164  b3ac0beef0  c8f2218ee2  dec0b11090  f20ccd91de
+062e5a23a6  192ab15daf  2ebbca3e57  442b144761  5d591ff74d  736536044      894dbd41f1  a08d9a2476  b4b39438f0  c8fc01c453  defd3457db  f20e7b5640
+0658da5bc0  193672f661  2f5996ff01  44c85584ae  5d902f1593  73f9370962     898a7dfd0c  a08dda47a8  b5918e4637  c9a8357e8f  dfa70fb232  f248c2bcdc
+067e2e4e61  196876abd7  2f6f83ea1f  4517d988d8  5dd2b849be  74ff105c0d     8a20d62ac0  a16208dde3  b6d73041c8  c9abde4c4b  dfac5b38df  f25f5e6f63
+068ba2946c  19cfd590f4  302a7f6b67  45b0dac5e3  5ea3e738c3  7543973e1a     8a35ef3cfe  a1d9da703c  b73f5cdc41  c9bf4c8b62  dfe9cbd72a  f2dc06b1d2
+06a3d79b68  1a130d092a  303745abc7  45ba9ea301  5eb31827b7  755c495a31     8a87c2ed7d  a23f391ba9  b8d441d736  ca0c580422  dffce1cf9a  f2e6c43543
+06b5863f73  1a22a99186  307e3262f1  45d2e33be1  5ee7c22ba0  75d29d69b8     8b2c0938d6  a24858e51e  b97261909e  ca0e09014e  e01b287af5  f2ec1f6a04
+06bc6d1b24  1a3100752b  30966f4c6e  46001f434d  5f0fb991a7  7692b88644     8b5caf3398  a24f64f7fb  ba3f266e19  ca3b651c23  e050c15a8d  f311090fa6
+06bd2cf800  1a8e0d78c0  30f4a2b44d  4610b2104c  5f99900f09  76f0eb2577     8bafc0c9d6  a29cccc784  ba414a3e6f  cab239278a  e0abd740ba  f33e242463
+076c822ecc  1ada7a0617  3134f5f3d6  46638cfd0f  5fb5d2dbf2  7739004a45     8be0cd3817  a30646cae6  ba89245cfd  cb7785f6ad  e0d1ed2159  f34d532901
+0796447f4b  1ae9e5d2a6  319787e6ec  469f112e38  5fd8addedf  77596f5d2a     8c3169b088  a30b666f83  ba8e2bce5d  cba701332a  e0de253456  f3685d06a9
+079a326597  1b379f1114  31a2c91c43  471cc4ba84  603964346e  778769dad8     8d0f714398  a31b2ef388  bac7ee3b1b  cbd4b3055e  e0e83b4ca3  f368a1f730
+07b8312ea9  1b75758486  320c3af000  47b37eb6f9  610eff6509  77b40ce601     8d563fc2cc  a46b21d949  bace6b6013  cc0aa81452  e1aa584dd5  f36e3e1e53
+07e6f56969  1b9692f0c7  32280ecbca  47c1209b9e  6115eddb86  77fe971eba     8d82d0dac0  a492fe77aa  bb05a0c48c  cc49215f67  e1b1d9de55  f38b0108a1
+07f5b601ee  1bb93d185e  324d07a5b3  47eb87b5bb  6126572846  781f5de0a8     8de35c04a3  a4c043ac48  bb0ad8a081  cc5237fd77  e1fb8626c8  f3d64c30f8
+07ff1c45bb  1be2c31cac  3391ff8a71  4808c4a397  612f70fe00  7831862f02     8e00ac7f59  a4d48ea6b3  bb87c292ad  cc5ea8026c  e2caaaf5b5  f3f016ba3f
+086f09d6e3  1c08823a41  33f78338cd  480ddaadc0  617326da3e  785e7504b9     8e22c48c20  a4e227f506  bc03d88fc3  ccdc33dc2a  e35232b92f  f47ec86138
+08bbbdcc3d  1c4b893630  3423e509af  484ad681df  617dc40bca  791a5c253d     8e6ff28354  a4f10da05d  bc2fce1d81  ccfd3ed9c7  e398684d27  f4c5b0646f
+08bd80ce2a  1c7a683c92  35050f41c5  48573f4c95  618310ed87  7968e15e5e     8ea517a2fc  a5114ca13d  bc400d86e1  cd0b6082d2  e3ad7115db  f5401524e5
+09a6767fc2  1c876c250f  3549335582  48701abb21  6183f0657d  7977624358     8f82c394d6  a56eda3549  bc94b31d5b  cd2994fcc1  e3b3b0d0c7  f5726eeeb2
+09bced689e  1cbb105c6a  354e4a0a50  4897e95232  61adeff7d5  79eb3fbc63     8fc40ba77b  a5859cfd40  bcbc6e1d2d  cd2e0629fe  e3c1da58dd  f576071590
+09d6e808b4  1cefb55d50  355e5e32db  48da625e8c  623c973c56  7a0a669e90     9071e139d9  a5dc38bf22  bcd2436daf  cd7973d92b  e3c39f4aea  f6659a3107
+0a184cf634  1d003b07bd  3583c4c70f  497588b572  6248c6742d  7a629f789c     9084d4cd97  a66af39cef  bd7375297e  cd88899edb  e3e0617f98  f6a9b64a0d
+0a5c013435  1d34f56de8  3597f00367  49789448b8  633f9a9f06  7a7980bb69     909a9ea5fc  a6e1a3bdda  bd9305480d  ce12db9e81  e3ecd49e2b  f7a60ba2a2
+0a76e06478  1e52e4c88f  35f2120068  49a82360aa  635852d56e  7b04052ad0     90d8e25cee  a72f31d6a6  bde1e479ad  ce3a7945ce  e3ef8b690b  f7d34e6706
+0a7cc12c0e  1eacc65607  364f01bc18  49c758655e  637a27d04b  7b37cccb03     91fc568d84  a7631adbe7  be05b26a38  cec8312f4e  e4007ff6b5  f7da3f0714
+0affa0f99f  1f7cbbdde1  373ac8fbdd  49fe768553  6391f0f921  7b4a316aea     924b364b9f  a766294249  be0ed6b33c  cf1ffd871d  e4e625a3e4  f8062cb7ce
+0b031f3119  1fb6538f81  37562e7f48  4a1a3a7dc5  639f2c4d5a  7b4cb756d4     927aacd5d1  a892730b61  be2e10f16a  d054227009  e4fb2a623b  f847086d15
+0b0bb941b7  20207b4844  3799bd47b3  4aef651da7  6464461276  7b6477cb95     928c9da20c  a897272241  be6205d016  d070e22e3b  e51b753e48  f8d5147d1d
+0c5385e84b  206bccc898  37c9538a2b  4ba22fa7e4  64672b5bf5  7b898d2d22     934599022f  a8bf42d646  be66c57b92  d0cb61bc64  e5a769dbf5  f8e13ab4ae
+0c6c7145ba  20871b98f3  37ea1c52f0  4bc04e0cde  646af5e14b  7bc286c1b6     9444b90aaa  a8f7f66985  be8367fcbe  d110b8f8b0  e6372539da  f8eac0ad24
+0c7962bd64  20ff72df6e  3864514494  4c141d5b1b  64b8886d68  7becc8122c     9460c8889d  a980334473  be91f7884d  d1345a65c1  e6671918c8  f8f12e4e6b
+0caa1ae59a  210f741378  3878be46f0  4c5c60fa76  64ea6b73c2  7c0ba828a9     9471b8d485  a9e4791c7e  beb802368c  d14b81c0c2  e667e09fe6  f9397af4cb
+0cf2e9402d  2150596d57  38d58a7a31  4cd52670aa  651dc6b4f1  7c31a42404     94b1acde81  aa6e508f0c  bee11d6a41  d1b9dff904  e69064f2f3  f94c225e84
+0d2ee665be  21532e059d  38fcf02d0b  4d451d9c36  652d9cb0d7  7c31bccde5     94ee15e8ba  aa852f7871  bf07750a0b  d1f82299d0  e6afbe3753  f97de2c3e9
+0d41f3a279  2162a7cf14  390eda9157  4e0b8cbd33  654a4f341b  7cd2ac43b4     951f01c9ad  aaa11940d3  bf50f418ba  d228e2d9dd  e7ac609391  f9f95681fd
+0d8ead0038  216b9e55e8  3928249b53  4e2db5058c  65aa268fcb  7d72f01865     95450f0c4e  aaa9c251de  bf6e439e38  d240136ce4  e7af285f7d  faba6e97d7
+0dce89ab21  21c5ee0ca5  394a542a19  4e9ab3ec88  666d04a14a  7d75c00a32     954633ea01  aab83fd6f1  bfcfe53c6a  d27235711b  e7ccd75e5d  faec2f0468
+0e100756bf  21d970d8de  39580e2a43  4ea827f5a1  66ba53719a  7d87b85065     956e415fb1  aad55d46ad  bfd3fd54d2  d290096f64  e7d7e7799d  fb05e13ad1
+0e28968c1f  2267ee32f3  39705fbdf1  4ef75031e3  66c98f4a9b  7d8d37ca38     95748dd597  ab046f8faf  c00b855082  d2f44bf242  e814070fd4  fb152519ad
+0e350246d3  2284bf5c9d  39e6ee46df  4f144c7489  67ab69f888  7dab70c8c8     95b9971d01  ab11145646  c026d108e0  d3a22366f4  e81c8b3eec  fb564c935d
+0e75f3c4d9  238b940049  39f36da05b  4f341f3af0  67b177d4f6  7dfdff1b7d     95c9a0f535  ab252b28c0  c06a983e63  d3b7d054c4  e86c6742b9  fb5a96b1a2
+0e900bcc5c  246fe09e98  3a161a857d  504cf57907  67d702f2e8  7e09430da7     95d525fbfd  ab4f373966  c07c707449  d3ba8b4232  e87f1ebcac  fb893ffaf3
+0eba3981c9  2489b7f4fe  3a3745a437  50809ea0d8  684d4da1fe  7e7cd69a59     9610a81463  ab61802aec  c07c8a276d  d415cc449b  e898c76c1f  fb9b4c2f15
+0f0191b10b  24b248e676  3a43c7b8d2  511061232   6855e1ac32  7e7d2e8640     961911d451  ab6983ae6c  c085ff3df4  d497bb124d  e8e81396b6  fc2875ea52
+0f25f24a4f  251443268c  3a520af32a  5166da6131  68739bdf1f  7eac902fd5     9663292843  abb6639ceb  c08d1d52b7  d4d2019f5d  e8ea9b4da8  fc85fb414c
+0f3474b837  252652d5ba  3aa115e55e  51bdbf173f  689fec23d7  7ed0e10b52     967d2a847a  abdb2a6169  c0b3c65080  d537ef1d41  e909f8213d  fd361ab85f
+0f69aefe3d  25927bb04c  3b50ff5f35  51dc4178bd  696317583f  7efa3f6b1b     96b7c379eb  abf29d2474  c0c863b72d  d551dac194  e91722b5a3  fd8560cfd6
+0fa1fdd47b  25aa952aa3  3b753d9ae8  523657b4d0  698c3bf2bb  7f22d5ef1b     979a852c94  ac250f0ead  c0cbb1fea1  d593a4f87a  e93cd5230e  fde8a3b4c0
+0fe8539661  25bae29ab3  3b90310b1c  52599ae063  69922a42d8  7f4d173c9c     97e5512e91  ac48a9b736  c0da8f4a4d  d61691f945  e945643bef  fdf7f5cd5d
+10242d1eaf  25bde9e167  3c8d535d49  5298ec174f  69e56cf0f8  7f68c514bd     9816c49e97  ac650ac94e  c0f5742640  d6419f6478  e9ac2fc517  fe1733741f
+104acbf7d2  25f3b7a318  3c95c89d61  5334a4164a  69e5939669  7f77abce34     9859de300f  ac78eb8124  c13c64461e  d662592b54  e9e16b6043  fe3fc057a1
+108ec0b806  260db9cf5a  3caf4324fd  5371eff4f9  6a217fbcb0  7f97f24691     98b4ec142f  acc5c94ec9  c173f62b15  d6702c681d  ea15f3457c  fe5fe0a8a4
+10c8ab99f4  260fa55d50  3cb9f85891  53755e535e  6ad6cef000  7fb8ff20e9     98cc0b7c9a  accad58571  c178491bc5  d6a77f7c22  ea3b3710a2  fe94fc30cf
+10eda02798  2634683a9f  3cbb18c391  53bd1b3b05  6b19334aeb  7ffc86edf4     98fe276aa8  acd69a1746  c24f94007b  d6bb698875  ea42cd27e6  ff17657f71
+1117299565  268513240f  3ce6d36ab5  546292a9db  6b40d1a939  8013901416     99010a8938  acd95847c5  c2522abc00  d6cbe4b28b  eaa6c90310
+114e349224  269fa95eb3  3ce88cdad2  54b005d19d  6bd39ac392  80ffca8a48     9906136b57  ad039341f9  c285c82ade  d6d9ddb03f  eaab7bcc15
+116456116b  270ada6f0d  3d0b7d4b4e  54b6127146  6c14d5fd01  8133208cb6     992cd74f2c  ad2d07fd11  c29b5e479c  d755b3d9d8  eab5494dca
+11b696efba  2748de13fb  3d838ee1ab  54bca9597e  6c75a5290e  816e996553     99532296c7  ad562ce09b  c2d714d386  d7abfc4b17  eb4bc76767
+11fc9df3a0  2779f8f9e2  3db0a1c8f3  54e7ffaea3  6cc2231b9c  81a82c3618     99a2503d63  ada5304e41  c31ebd4b22  d7b871aaa8  eb8ef9b4cc
+1204e08f17  27be88d408  3e6ceea56c  55b2bf8036  6d89a7320d  824d9cfa6e     99eae0b1f8  adf4ab4a53  c340418532  d7fc87324e  ebc200e928
+(robot_lab) [sairamm_hpc@sgpu002 data]$ cd 54
+546292a9db/ 54b005d19d/ 54b6127146/ 54bca9597e/ 54e7ffaea3/ 
+(robot_lab) [sairamm_hpc@sgpu002 data]$ cd 54
+546292a9db/ 54b005d19d/ 54b6127146/ 54bca9597e/ 54e7ffaea3/ 
+(robot_lab) [sairamm_hpc@sgpu002 data]$ cd 54e7ffaea3/
+(robot_lab) [sairamm_hpc@sgpu002 54e7ffaea3]$ ls
+dslr  iphone
+(robot_lab) [sairamm_hpc@sgpu002 54e7ffaea3]$ cd dslr/
+(robot_lab) [sairamm_hpc@sgpu002 dslr]$ ls
+colmap  resized_anon_masks  resized_images  resized_undistorted_images  resized_undistorted_masks  train_test_lists.json
+(robot_lab) [sairamm_hpc@sgpu002 dslr]$ cd resized_undistorted_
+bash: cd: resized_undistorted_: No such file or directory
+(robot_lab) [sairamm_hpc@sgpu002 dslr]$ cd resized_undistorted_images/
+(robot_lab) [sairamm_hpc@sgpu002 resized_undistorted_images]$ ls
+DSC00062.JPG  DSC00095.JPG  DSC00131.JPG  DSC00170.JPG  DSC00218.JPG  DSC00268.JPG  DSC00317.JPG  DSC00366.JPG  DSC00423.JPG  DSC00471.JPG
+DSC00063.JPG  DSC00096.JPG  DSC00134.JPG  DSC00174.JPG  DSC00219.JPG  DSC00269.JPG  DSC00318.JPG  DSC00367.JPG  DSC00424.JPG  DSC00472.JPG
+DSC00064.JPG  DSC00097.JPG  DSC00135.JPG  DSC00175.JPG  DSC00224.JPG  DSC00270.JPG  DSC00319.JPG  DSC00372.JPG  DSC00425.JPG  DSC00473.JPG
+DSC00065.JPG  DSC00098.JPG  DSC00136.JPG  DSC00176.JPG  DSC00225.JPG  DSC00271.JPG  DSC00320.JPG  DSC00374.JPG  DSC00427.JPG  DSC00474.JPG
+DSC00066.JPG  DSC00099.JPG  DSC00138.JPG  DSC00177.JPG  DSC00226.JPG  DSC00274.JPG  DSC00323.JPG  DSC00375.JPG  DSC00428.JPG  DSC00475.JPG
+DSC00067.JPG  DSC00100.JPG  DSC00139.JPG  DSC00178.JPG  DSC00227.JPG  DSC00275.JPG  DSC00325.JPG  DSC00377.JPG  DSC00429.JPG  DSC00476.JPG
+DSC00068.JPG  DSC00101.JPG  DSC00141.JPG  DSC00179.JPG  DSC00228.JPG  DSC00276.JPG  DSC00326.JPG  DSC00378.JPG  DSC00430.JPG  DSC00477.JPG
+DSC00069.JPG  DSC00102.JPG  DSC00142.JPG  DSC00181.JPG  DSC00229.JPG  DSC00278.JPG  DSC00328.JPG  DSC00379.JPG  DSC00431.JPG  DSC00478.JPG
+DSC00070.JPG  DSC00103.JPG  DSC00143.JPG  DSC00182.JPG  DSC00230.JPG  DSC00280.JPG  DSC00329.JPG  DSC00384.JPG  DSC00434.JPG  DSC00479.JPG
+DSC00071.JPG  DSC00104.JPG  DSC00144.JPG  DSC00183.JPG  DSC00231.JPG  DSC00282.JPG  DSC00330.JPG  DSC00386.JPG  DSC00435.JPG  DSC00480.JPG
+DSC00072.JPG  DSC00105.JPG  DSC00145.JPG  DSC00184.JPG  DSC00232.JPG  DSC00285.JPG  DSC00331.JPG  DSC00387.JPG  DSC00436.JPG  DSC00481.JPG
+DSC00073.JPG  DSC00106.JPG  DSC00146.JPG  DSC00185.JPG  DSC00233.JPG  DSC00286.JPG  DSC00336.JPG  DSC00388.JPG  DSC00437.JPG  DSC00482.JPG
+DSC00074.JPG  DSC00107.JPG  DSC00147.JPG  DSC00186.JPG  DSC00234.JPG  DSC00288.JPG  DSC00337.JPG  DSC00389.JPG  DSC00438.JPG  DSC00483.JPG
+DSC00075.JPG  DSC00108.JPG  DSC00148.JPG  DSC00187.JPG  DSC00235.JPG  DSC00289.JPG  DSC00339.JPG  DSC00390.JPG  DSC00439.JPG  DSC00484.JPG
+DSC00076.JPG  DSC00109.JPG  DSC00149.JPG  DSC00189.JPG  DSC00236.JPG  DSC00290.JPG  DSC00340.JPG  DSC00394.JPG  DSC00440.JPG  DSC00485.JPG
+DSC00077.JPG  DSC00111.JPG  DSC00150.JPG  DSC00190.JPG  DSC00238.JPG  DSC00291.JPG  DSC00341.JPG  DSC00395.JPG  DSC00441.JPG  DSC00486.JPG
+DSC00078.JPG  DSC00112.JPG  DSC00151.JPG  DSC00191.JPG  DSC00239.JPG  DSC00292.JPG  DSC00342.JPG  DSC00396.JPG  DSC00442.JPG  DSC00487.JPG
+DSC00079.JPG  DSC00113.JPG  DSC00152.JPG  DSC00193.JPG  DSC00240.JPG  DSC00293.JPG  DSC00343.JPG  DSC00397.JPG  DSC00443.JPG  DSC00488.JPG
+DSC00080.JPG  DSC00114.JPG  DSC00153.JPG  DSC00194.JPG  DSC00241.JPG  DSC00295.JPG  DSC00344.JPG  DSC00399.JPG  DSC00444.JPG  DSC00489.JPG
+DSC00081.JPG  DSC00115.JPG  DSC00154.JPG  DSC00195.JPG  DSC00245.JPG  DSC00300.JPG  DSC00346.JPG  DSC00400.JPG  DSC00445.JPG  DSC00490.JPG
+DSC00082.JPG  DSC00116.JPG  DSC00155.JPG  DSC00196.JPG  DSC00246.JPG  DSC00301.JPG  DSC00351.JPG  DSC00401.JPG  DSC00446.JPG  DSC00491.JPG
+DSC00083.JPG  DSC00117.JPG  DSC00156.JPG  DSC00198.JPG  DSC00247.JPG  DSC00302.JPG  DSC00352.JPG  DSC00402.JPG  DSC00447.JPG  DSC00492.JPG
+DSC00084.JPG  DSC00118.JPG  DSC00157.JPG  DSC00202.JPG  DSC00252.JPG  DSC00303.JPG  DSC00353.JPG  DSC00403.JPG  DSC00448.JPG  DSC00493.JPG
+DSC00085.JPG  DSC00120.JPG  DSC00158.JPG  DSC00204.JPG  DSC00253.JPG  DSC00304.JPG  DSC00355.JPG  DSC00405.JPG  DSC00449.JPG  DSC00494.JPG
+DSC00086.JPG  DSC00121.JPG  DSC00159.JPG  DSC00205.JPG  DSC00254.JPG  DSC00307.JPG  DSC00357.JPG  DSC00406.JPG  DSC00452.JPG  DSC00495.JPG
+DSC00087.JPG  DSC00122.JPG  DSC00161.JPG  DSC00206.JPG  DSC00255.JPG  DSC00309.JPG  DSC00358.JPG  DSC00407.JPG  DSC00456.JPG  DSC00496.JPG
+DSC00088.JPG  DSC00123.JPG  DSC00162.JPG  DSC00207.JPG  DSC00258.JPG  DSC00310.JPG  DSC00359.JPG  DSC00408.JPG  DSC00464.JPG  DSC00497.JPG
+DSC00089.JPG  DSC00124.JPG  DSC00164.JPG  DSC00208.JPG  DSC00259.JPG  DSC00311.JPG  DSC00360.JPG  DSC00409.JPG  DSC00465.JPG  DSC00498.JPG
+DSC00090.JPG  DSC00125.JPG  DSC00165.JPG  DSC00210.JPG  DSC00261.JPG  DSC00312.JPG  DSC00361.JPG  DSC00410.JPG  DSC00466.JPG  DSC00499.JPG
+DSC00091.JPG  DSC00126.JPG  DSC00166.JPG  DSC00211.JPG  DSC00263.JPG  DSC00313.JPG  DSC00362.JPG  DSC00411.JPG  DSC00467.JPG  DSC00500.JPG
+DSC00092.JPG  DSC00127.JPG  DSC00167.JPG  DSC00212.JPG  DSC00264.JPG  DSC00314.JPG  DSC00363.JPG  DSC00413.JPG  DSC00468.JPG  DSC00501.JPG
+DSC00093.JPG  DSC00128.JPG  DSC00168.JPG  DSC00214.JPG  DSC00266.JPG  DSC00315.JPG  DSC00364.JPG  DSC00416.JPG  DSC00469.JPG  DSC00502.JPG
+DSC00094.JPG  DSC00129.JPG  DSC00169.JPG  DSC00216.JPG  DSC00267.JPG  DSC00316.JPG  DSC00365.JPG  DSC00422.JPG  DSC00470.JPG  DSC00503.JPG
+(robot_lab) [sairamm_hpc@sgpu002 resized_undistorted_images]$ 

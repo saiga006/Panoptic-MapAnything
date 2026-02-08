@@ -51,4 +51,159 @@ _darcs
 /projects/*/datasets
 /models
 /snippet
->>>>>>> 161be51 (Initial commit)
+
+# ============================================
+# Deep Learning Project .gitignore
+# For Mask2Former + MapAnything Integration
+# ============================================
+
+# ----------------
+# Checkpoints & Model Weights
+# ----------------
+*.pth
+*.ckpt
+*.pt
+*.bin
+*.h5
+*.pb
+*.weights
+pretrained_models/
+checkpoints/
+model_zoo/
+saved_models/
+backup_models/
+
+# ----------------
+# Training Outputs & Results
+# ----------------
+output*/
+output_*/
+results/
+runs/
+experiments/
+logs/
+tensorboard/
+wandb/
+
+# ----------------
+# Slurm Log Files
+# ----------------
+slurm-*.out
+slurm_*.out
+slurm-*.err
+slurm_*.err
+*.slurm
+nohup.out
+
+# ----------------
+# Backup Directories
+# ----------------
+backup/
+backup*/
+*_backup/
+*_backup*/
+mask_loss_fix_op/
+test_memory*/
+
+# ----------------
+# Dataset Directories
+# ----------------
+dataset/
+datasets/
+raw_data/
+processed_data/
+coco/
+ade20k/
+mapillary/
+cityscapes/
+
+# ----------------
+# Python
+# ----------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ----------------
+# Jupyter Notebook
+# ----------------
+.ipynb_checkpoints
+*.ipynb
+
+# ----------------
+# Virtual Environments
+# ----------------
+venv/
+ENV/
+env/
+.venv
+conda_env/
+
+# ----------------
+# IDEs
+# ----------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ----------------
+# Detectron2 / Mask2Former Specific
+configs/scannetpp/scannetpp/
+configs/renderpy/
+inference_output/
+output_inference/
+visualization/
+
+# ----------------
+# Large Cache Files
+# ----------------
+*.cache
+.cache/
+*.log
+*.out
+*.err
+
+# ----------------
+# Temporary & System Files
+# ----------------
+*.tmp
+*.temp
+tmp/
+temp/
+.tmp/
+
+# ----------------
+# Git & Version Control
+# ----------------
+*.orig
+*.rej
+
+# ============================================
+# Keep These Files (Exceptions)
+# ============================================
+# Uncomment if you want to track specific files
+# !configs/base_config.yaml
+# !pretrained_models/README.md

@@ -156,7 +156,15 @@ class MSDeformAttnTransformerEncoder(nn.Module):
         output = src
         reference_points = self.get_reference_points(spatial_shapes, valid_ratios, device=src.device)
         for _, layer in enumerate(self.layers):
-            output = layer(output, pos, reference_points, spatial_shapes, level_start_index, padding_mask)
+            # Use gradient checkpointing during training to save memory
+            if self.training and False:
+                output = torch.utils.checkpoint.checkpoint(
+                    layer, output, pos, reference_points, spatial_shapes, 
+                    level_start_index, padding_mask,
+                    use_reentrant=False
+                )
+            else:
+                output = layer(output, pos, reference_points, spatial_shapes, level_start_index, padding_mask)
 
         return output
 

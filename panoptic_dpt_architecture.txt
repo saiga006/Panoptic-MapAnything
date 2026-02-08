@@ -1,0 +1,173 @@
+explain data collation in  below context and also explain how panoptic labels are generated from scannet++ dataset ?
+As I know scannet++ dataset uses multiple files for instance and semantic labels, and doesn't provide panoptic labels seperately ?
+Also explain how view selection within a single scene is done, is it based on taking camera poses in consideration ? 
+
+I have given relevant papers as well. 
+Please implement following functionality, as I would be using training with multiple views only.
+1.Modify MapAnythingWithPanopticDPT.forward() to accept multiple views with poses.
+2. Update the data collation to batch multiple views together.
+3. Prepare camera poses in MapAnything's expected format (MultiViewTransformerInput).
+
+
+MULTI-VIEW ARCHITECTURE WITH 3D CONSISTENCY LOSSES
+═══════════════════════════════════════════════════════════════════════════
+
+INPUT STAGE:
+┌─────────────────────────────────────────────────────────────────────────┐
+│  N Views from Same Scene [B, N, 3, H, W]                                │
+│  + Camera Poses [B, N, 4, 4]                                            │
+│  + Camera Intrinsics [B, N, 3, 3]                                       │
+└─────────────────────────────────────────────────────────────────────────┘
+                              ↓
+                              
+FROZEN MAPANYTHING BACKBONE (Multi-View Processing):
+┌─────────────────────────────────────────────────────────────────────────┐
+│  DINOv2 Encoder                                                          │
+│  ├─ Encodes ALL N views independently                                   │
+│  └─ Output: [encoder_feat_0, encoder_feat_1, ..., encoder_feat_N]      │
+│                                                                          │
+│  Geometric Encoding (Optional)                                          │
+│  ├─ Converts camera poses → geometric tokens                            │
+│  └─ Fuses with encoder features                                         │
+│                                                                          │
+│  Multi-View Transformer (info_sharing)                                  │
+│  ├─ Cross-attention between all N views                                 │
+│  ├─ Each view "sees" all other views                                    │
+│  └─ Output: [final_feat_0, ..., final_feat_N] + intermediates          │
+└─────────────────────────────────────────────────────────────────────────┘
+                              ↓
+                    Shared encoder features
+                    (4 layers per view)
+                              ↓
+              ┌───────────────┴───────────────┐
+              ↓                               ↓
+
+┌──────────────────────────┐      ┌──────────────────────────────────────┐
+│ FROZEN: Geometric DPT    │      │ TRAINABLE: Panoptic DPT              │
+│ (MapAnything's original) │      │ (Initialized from Geometric DPT)     │
+├──────────────────────────┤      ├──────────────────────────────────────┤
+│ FOR EACH VIEW i in N:    │      │ FOR EACH VIEW i in N:                │
+│   Run geometric DPT      │      │   Run panoptic DPT                   │
+│                          │      │                                      │
+│ Outputs (per view):      │      │ Outputs (per view):                  │
+│ • depth_i [B,1,H,W]     │      │ • res2_i [B, 96,H/4,W/4]            │
+│ • confidence_i [B,1,H,W]│      │ • res3_i [B,192,H/8,W/8]            │
+│                          │      │ • res4_i [B,384,H/16,W/16]          │
+│ Stack for all views:     │      │ • res5_i [B,768,H/32,W/32]          │
+│ depths: [N,B,1,H,W]     │      │                                      │
+│ confs:  [N,B,1,H,W]     │      │ Stack for all views:                 │
+│                          │      │ all_view_features['res2']: [N,B,C,h,w]│
+└──────────────────────────┘      └──────────────────────────────────────┘
+              ↓                                   ↓
+    Used as WEIGHTS                    Used as FEATURES TO ALIGN
+              ↓                                   ↓
+              └─────────────┬─────────────────────┘
+                           ↓
+                           
+TRAINABLE: MASK2FORMER HEAD (Applied to Reference View):
+┌─────────────────────────────────────────────────────────────────────────┐
+│  MSDeformAttn Pixel Decoder                                              │
+│  ├─ Processes panoptic features {res2, res3, res4, res5} from view_0    │
+│  └─ Outputs multi-scale features                                        │
+│                                                                          │
+│  Transformer Decoder                                                     │
+│  ├─ Query-based masked attention                                        │
+│  ├─ Outputs: query_embeddings [B, Q, D]                                 │
+│  └─         pred_masks [B, Q, H, W]                                     │
+│                                                                          │
+│  Classification & Mask Heads                                            │
+│  └─ Final panoptic predictions for view_0                               │
+└─────────────────────────────────────────────────────────────────────────┘
+              ↓
+    2D Supervision Loss (reference view only)
+    Loss_panoptic = L_ce + L_mask + L_dice
+              ↓
+              
+              
+3D CONSISTENCY LOSSES (MultiViewConsistencyLoss module):
+═══════════════════════════════════════════════════════════════════════════
+
+INPUTS TO CONSISTENCY LOSS:
+┌─────────────────────────────────────────────────────────────────────────┐
+│ From Geometric DPT:          From Panoptic DPT:                         │
+│ • depths [N,1,H,W]           • all_view_features:                       │
+│ • confidences [N,1,H,W]      │   - res2 [N,B,96,H/4,W/4]               │
+│                              │   - res3 [N,B,192,H/8,W/8]              │
+│ From Camera Data:            │   - res4 [N,B,384,H/16,W/16]            │
+│ • camera_poses [N,4,4]       │   - res5 [N,B,768,H/32,W/32]            │
+│ • camera_intrinsics [N,3,3]  │                                         │
+│                              │ From Mask2Former (optional):             │
+│                              │ • query_embeddings [N,Q,D]               │
+│                              │ • pred_masks [N,Q,H,W]                   │
+└─────────────────────────────────────────────────────────────────────────┘
+              ↓
+┌─────────────────────────────────────────────────────────────────────────┐
+│ STEP 1: Compute Correspondences (depth-based reprojection)              │
+│ ────────────────────────────────────────────────────────────────────────│
+│ For each pair (view_i, view_j):                                         │
+│   1. Unproject view_i pixels using depth_i → 3D points                  │
+│   2. Transform 3D points using camera_pose_i → world coords             │
+│   3. Transform world coords using camera_pose_j^-1 → view_j cam coords  │
+│   4. Project to view_j using intrinsics_j → pixel coords                │
+│   5. Filter by:                                                          │
+│      • confidence_i > threshold                                          │
+│      • depth_i > 0                                                       │
+│      • projected coords in view_j bounds                                 │
+│                                                                          │
+│ Output: List of valid correspondences                                   │
+│   corresp = {src_idx, tgt_idx, src_coords, tgt_coords, valid_mask}     │
+└─────────────────────────────────────────────────────────────────────────┘
+              ↓
+              ├──────────────────┬──────────────────┬──────────────────┐
+              ↓                  ↓                  ↓                  ↓
+              
+┌───────────────────────┐ ┌────────────────────┐ ┌──────────────────────┐
+│ LOSS 1: Dense Feature │ │ LOSS 2: Query      │ │ LOSS 3: Mask         │
+│ Consistency           │ │ Contrastive        │ │ Projection           │
+├───────────────────────┤ ├────────────────────┤ ├──────────────────────┤
+│ Weight: λ₁ = 0.1      │ │ Weight: λ₂ = 0.05  │ │ Weight: λ₃ = 0.1     │
+├───────────────────────┤ ├────────────────────┤ ├──────────────────────┤
+│ For each corresp:     │ │ For each query:    │ │ For each corresp:    │
+│                       │ │                    │ │                      │
+│ 1. Sample panoptic    │ │ 1. Compute 3D      │ │ 1. Warp mask from    │
+│    features at src    │ │    centroid of     │ │    src to tgt using  │
+│    coords in view_i   │ │    query's mask    │ │    correspondences   │
+│    → feat_src         │ │    using depth     │ │                      │
+│                       │ │                    │ │ 2. Compare warped    │
+│ 2. Sample panoptic    │ │ 2. Group queries   │ │    mask with actual  │
+│    features at tgt    │ │    by 3D proximity │ │    tgt mask          │
+│    coords in view_j   │ │    (< 0.1m)        │ │                      │
+│    → feat_tgt         │ │                    │ │ 3. Weight by         │
+│                       │ │ 3. InfoNCE loss:   │ │    confidence        │
+│ 3. Get confidence     │ │    Queries with    │ │                      │
+│    weight from        │ │    same 3D loc     │ │ Output:              │
+│    confidence_i       │ │    should have     │ │ L_mask = Σ conf_i *  │
+│                       │ │    similar embed   │ │   |mask_src_warped - │
+│ 4. Weighted L2 loss:  │ │                    │ │    mask_tgt|         │
+│    L_dense =          │ │ Output:            │ │                      │
+│    Σ conf_i *         │ │ L_query =          │ └──────────────────────┘
+│    ||feat_src -       │ │ -log(exp(sim+)/    │
+│      feat_tgt||²      │ │   Σexp(sim_all))   │
+│                       │ │                    │
+│ Uses: res3 features   │ │ Uses: query_embed  │
+│       (192 channels)  │ │       pred_masks   │
+│                       │ │       depths       │
+└───────────────────────┘ └────────────────────┘
+              ↓                  ↓                  ↓
+              └──────────────────┴──────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────────────┐
+│ TOTAL LOSS COMPUTATION                                                   │
+│ ────────────────────────────────────────────────────────────────────────│
+│ L_total = L_panoptic (2D supervision on reference view)                 │
+│         + λ₁ · L_dense_consistency                                       │
+│         + λ₂ · L_query_consistency                                       │
+│         + λ₃ · L_mask_consistency                                        │
+│                                                                          │
+│ Activated only after warmup_iter (e.g., 5000 iterations)                │
+└─────────────────────────────────────────────────────────────────────────┘
+              ↓
+         Backpropagation
+              ↓
+    Updates ONLY Panoptic DPT + Mask2Former
+    (MapAnything frozen, Geometric DPT frozen)

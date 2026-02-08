@@ -148,7 +148,33 @@ class HungarianMatcher(nn.Module):
             )
             C = C.reshape(num_queries, -1).cpu()
 
+            # Handle NaN/Inf values to prevent linear_sum_assignment crash
+            if torch.isnan(C).any() or torch.isinf(C).any():
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(
+                    f"NaN/Inf detected in cost matrix! "
+                    f"cost_mask has NaN: {torch.isnan(cost_mask).any()}, "
+                    f"cost_class has NaN: {torch.isnan(cost_class).any()}, "
+                    f"cost_dice has NaN: {torch.isnan(cost_dice).any()}"
+                )
+                # Replace NaN/Inf with large finite values
+                C = torch.nan_to_num(C, nan=1e6, posinf=1e6, neginf=-1e6)
+
             indices.append(linear_sum_assignment(C))
+
+        # ===== DIAGNOSTIC: Log matching results (first few calls) =====
+        if not hasattr(self, '_match_call_count'):
+            self._match_call_count = 0
+        self._match_call_count += 1
+        if self._match_call_count <= 10:
+            for b_idx, (src_i, tgt_j) in enumerate(indices):
+                n_matched = len(src_i)
+                n_tgt = len(targets[b_idx]["labels"])
+                tgt_mask_sums = targets[b_idx]["masks"].sum(dim=(1,2)) if n_tgt > 0 else []
+                print(f"  [MATCH-DIAG #{self._match_call_count}] batch={b_idx}: "
+                      f"n_queries={num_queries}, n_targets={n_tgt}, n_matched={n_matched}, "
+                      f"tgt_mask_sums(first5)={tgt_mask_sums[:5].tolist() if hasattr(tgt_mask_sums, 'tolist') else tgt_mask_sums}")
 
         return [
             (torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64))

@@ -332,6 +332,14 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
         if self.mask_classification:
             self.class_embed = nn.Linear(hidden_dim, num_classes + 1)
         self.mask_embed = MLP(hidden_dim, hidden_dim, mask_dim, 3)
+        
+        # Learnable mask logit bias — added to every mask logit after einsum.
+        # Initialized to +2.0 so that initial sigmoid(logit) ≈ 0.88 instead of 0.5.
+        # This counteracts BCE's tendency to push unmatched queries negative and
+        # prevents the "predict nothing" collapse where all logits go to -∞.
+        # The bias is per-query (shape [num_queries, 1, 1]) so each query can 
+        # independently learn its own foreground/background prior.
+        self.mask_logit_bias = nn.Parameter(torch.full((num_queries, 1, 1), 2.0))
 
     @classmethod
     def from_config(cls, cfg, in_channels, mask_classification):
@@ -436,6 +444,10 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
         outputs_class = self.class_embed(decoder_output)
         mask_embed = self.mask_embed(decoder_output)
         outputs_mask = torch.einsum("bqc,bchw->bqhw", mask_embed, mask_features)
+        
+        # Add learnable per-query bias to prevent mask logit collapse.
+        # mask_logit_bias is [Q, 1, 1], broadcasts to [B, Q, H, W]
+        outputs_mask = outputs_mask + self.mask_logit_bias
 
         # NOTE: prediction is of higher-resolution
         # [B, Q, H, W] -> [B, Q, H*W] -> [B, h, Q, H*W] -> [B*h, Q, HW]
