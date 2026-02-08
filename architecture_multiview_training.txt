@@ -1,0 +1,457 @@
+═══════════════════════════════════════════════════════════════════════════
+MULTI-VIEW PANOPTIC SEGMENTATION WITH QUERY PROPAGATION
+Architecture Documentation for m2f_train_multiview.py
+═══════════════════════════════════════════════════════════════════════════
+
+
+OVERVIEW
+--------
+This training pipeline implements multi-view panoptic segmentation using:
+1. MapAnything backbone (frozen) - DINOv2 + cross-view transformer
+2. Panoptic DPT head (trainable) - Multi-scale feature extraction
+3. Mask2Former decoder with Query Propagation (trainable) - Alpha-blended attention
+
+Key Features:
+• Query propagation from reference view to target views
+• Alpha-blended attention masks for cross-view consistency
+• Direct supervision on both reference and target views
+• Depth rendering from 3D mesh (ScanNet++)
+• Periodic evaluation with PQ/SQ/RQ metrics
+• CSV logging for training curves and view analysis
+
+
+═══════════════════════════════════════════════════════════════════════════
+DATA PIPELINE
+═══════════════════════════════════════════════════════════════════════════
+
+INPUT: ScanNet++ Dataset
+┌─────────────────────────────────────────────────────────────────────────┐
+│ Scene Structure:                                                         │
+│   scannetpp/                                                             │
+│   ├── data/<scene_id>/                                                  │
+│   │   ├── dslr/                                                         │
+│   │   │   ├── resized_images/     # RGB images                          │
+│   │   │   ├── nerfstudio/transforms.json  # Camera poses & intrinsics  │
+│   │   │   └── colmap/             # COLMAP reconstruction               │
+│   │   └── scans/                                                        │
+│   │       └── mesh_aligned_0.05.ply  # 3D mesh for depth rendering     │
+│   └── panoptic_annotations/                                             │
+│       └── <scene_id>/                                                   │
+│           └── <image_name>.png    # Panoptic ground truth               │
+│                                                                          │
+│ Per Sample (N views from same scene):                                   │
+│   • images: [N, 3, H, W] - RGB images                                   │
+│   • camera_poses: [N, 4, 4] - World-to-camera transforms                │
+│   • camera_intrinsics: [N, 3, 3] - Intrinsic matrices                   │
+│   • depth_maps: [N, H, W] - Rendered from mesh (optional)               │
+│   • panoptic_targets: [N, H, W] - Ground truth segmentation             │
+└─────────────────────────────────────────────────────────────────────────┘
+
+Dataset Mapper: ScanNetPPMultiViewDatasetMapper
+───────────────────────────────────────────────
+File: scannetpp_panoptic_dataset_mapper.py
+
+View Selection Strategy:
+  1. Load all camera poses for a scene
+  2. Compute pairwise distances between camera positions
+  3. Select views with minimum distance threshold (cfg.INPUT.MIN_CAMERA_DISTANCE)
+  4. Random sampling from valid view pairs
+
+Depth Rendering (from 3D mesh):
+  • Uses Open3D RaycastingScene for GPU-accelerated raycasting
+  • Loads mesh_aligned_0.05.ply once per scene
+  • Casts rays from camera origin through each pixel
+  • Computes intersection distance as depth value
+  • Cached to: depth_cache/<scene_id>/<image_name>.npy
+
+Panoptic Label Generation:
+  • Combines instance segmentation + semantic labels
+  • Format: panoptic_id = semantic_id * 1000 + instance_id
+  • thing classes: individual instances get unique IDs
+  • stuff classes: all pixels share same semantic ID
+
+
+═══════════════════════════════════════════════════════════════════════════
+MODEL ARCHITECTURE
+═══════════════════════════════════════════════════════════════════════════
+
+LAYER 1: MapAnything Backbone (FROZEN)
+┌─────────────────────────────────────────────────────────────────────────┐
+│  Input: Multi-view images + poses + intrinsics                          │
+│                                                                          │
+│  DINOv2 ViT-L Encoder:                                                   │
+│  ├─ Patch size: 14x14                                                    │
+│  ├─ Hidden dim: 768                                                      │
+│  ├─ Encodes each view independently                                     │
+│  └─ Output: [N, B, 768, H/14, W/14]                                     │
+│                                                                          │
+│  Info-Sharing Transformer:                                               │
+│  ├─ Cross-attention between all N views                                 │
+│  ├─ Geometric encoding from camera poses                                │
+│  └─ Output: Shared multi-view features                                  │
+│                                                                          │
+│  Pretrained: pretrained_models/map_anything/model.pt                     │
+│  Config: pretrained_models/map_anything/config.yaml                      │
+└─────────────────────────────────────────────────────────────────────────┘
+                              ↓
+                              
+LAYER 2: Panoptic DPT Head (TRAINABLE)
+┌─────────────────────────────────────────────────────────────────────────┐
+│  Class: PanopticDPTHead                                                  │
+│                                                                          │
+│  Purpose: Convert MapAnything features to multi-scale Mask2Former input │
+│                                                                          │
+│  Architecture:                                                           │
+│  ├─ Input: MapAnything features [B, 768, H/14, W/14]                    │
+│  ├─ Reassemble blocks (per scale level)                                 │
+│  ├─ Fusion blocks with skip connections                                 │
+│  └─ Output multi-scale features:                                        │
+│       • res2: [B, 96,  H/4,  W/4 ]                                      │
+│       • res3: [B, 192, H/8,  W/8 ]                                      │
+│       • res4: [B, 384, H/16, W/16]                                      │
+│       • res5: [B, 768, H/32, W/32]                                      │
+│                                                                          │
+│  Applied to ALL views (reference + targets)                              │
+└─────────────────────────────────────────────────────────────────────────┘
+                              ↓
+                              
+LAYER 3: Mask2Former Decoder with Query Propagation (TRAINABLE)
+┌─────────────────────────────────────────────────────────────────────────┐
+│                                                                          │
+│  PIXEL DECODER (MSDeformAttn):                                           │
+│  ├─ Input: Multi-scale features {res2, res3, res4, res5}                │
+│  ├─ Deformable attention across scales                                  │
+│  └─ Output: Enhanced multi-scale pixel features                         │
+│                                                                          │
+│  TRANSFORMER DECODER (QueryPropagationTransformerDecoder):               │
+│  ├─ Object queries: [Q=100, D=256]                                       │
+│  ├─ 9 decoder layers with:                                               │
+│  │   • Masked cross-attention (query ↔ pixel features)                  │
+│  │   • Self-attention (query ↔ query)                                   │
+│  │   • FFN                                                               │
+│  └─ Query Propagation Mechanism (for target views):                      │
+│                                                                          │
+│      ALPHA-BLENDED ATTENTION MASKS                                       │
+│      ─────────────────────────────                                       │
+│      For layer l, computing attention on target view:                    │
+│                                                                          │
+│        attn_mask_l = α_l · attn_mask_ref_l + (1 - α_l) · attn_mask_tgt_l │
+│                                                                          │
+│      Where:                                                              │
+│        • attn_mask_ref_l: Attention mask from reference view layer l    │
+│        • attn_mask_tgt_l: Fresh attention mask computed on target       │
+│        • α_l: Layer-specific blending weight                             │
+│                                                                          │
+│      Alpha Schedule (learnable or fixed):                                │
+│        Layer 0-2: α ≈ 0.8 (strong reference guidance)                   │
+│        Layer 3-5: α ≈ 0.5 (balanced)                                    │
+│        Layer 6-8: α ≈ 0.3 (more target adaptation)                      │
+│                                                                          │
+│  PREDICTION HEADS:                                                       │
+│  ├─ Class head: query → [B, Q, num_classes + 1]                         │
+│  └─ Mask head: query → [B, Q, H, W]                                     │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+
+
+═══════════════════════════════════════════════════════════════════════════
+TRAINING FLOW
+═══════════════════════════════════════════════════════════════════════════
+
+Forward Pass: MultiViewMask2Former._forward_train()
+────────────────────────────────────────────────────
+
+STEP 1: Process through backbone
+┌─────────────────────────────────────────────────────────────────────────┐
+│  # All N views processed together through MapAnything                   │
+│  ma_features = self.map_anything(images, poses, intrinsics)             │
+│                                                                          │
+│  # Panoptic features for each view                                       │
+│  panoptic_features = [self.panoptic_dpt(ma_features[i]) for i in range(N)]│
+└─────────────────────────────────────────────────────────────────────────┘
+
+STEP 2: Decode reference view (view_0)
+┌─────────────────────────────────────────────────────────────────────────┐
+│  ref_features = panoptic_features[0]                                     │
+│                                                                          │
+│  ref_outputs = self.mask2former_decoder(                                 │
+│      features=ref_features,      # {res2, res3, res4, res5}             │
+│      targets=ref_targets,        # Ground truth for view_0              │
+│      return_attention_masks=True # Save for propagation                 │
+│  )                                                                       │
+│                                                                          │
+│  # Outputs:                                                              │
+│  ref_pred_logits   = ref_outputs['pred_logits']   # [B, Q, num_classes+1]│
+│  ref_pred_masks    = ref_outputs['pred_masks']    # [B, Q, H, W]        │
+│  ref_queries       = ref_outputs['query_embeddings']  # [B, Q, D]       │
+│  ref_attention_masks = ref_outputs['attention_masks'] # Per-layer masks │
+└─────────────────────────────────────────────────────────────────────────┘
+
+STEP 3: Compute reference view loss
+┌─────────────────────────────────────────────────────────────────────────┐
+│  ref_losses = self.criterion(ref_outputs, ref_targets)                  │
+│                                                                          │
+│  # Standard Mask2Former losses:                                          │
+│  loss_ce   = cross-entropy classification loss                          │
+│  loss_mask = binary mask loss (sigmoid focal)                           │
+│  loss_dice = dice loss for mask quality                                 │
+└─────────────────────────────────────────────────────────────────────────┘
+
+STEP 4: Propagate queries to target views
+┌─────────────────────────────────────────────────────────────────────────┐
+│  target_losses = []                                                      │
+│                                                                          │
+│  for i in range(1, N):  # Target views                                  │
+│      tgt_features = panoptic_features[i]                                │
+│      tgt_targets = targets[i]                                           │
+│                                                                          │
+│      # Decode with query propagation                                     │
+│      tgt_outputs = self.mask2former_decoder.forward_with_propagation(   │
+│          features=tgt_features,                                          │
+│          ref_queries=ref_queries,                                        │
+│          ref_attention_masks=ref_attention_masks,                        │
+│          alpha_schedule=self.alpha_schedule,  # Per-layer blending      │
+│      )                                                                   │
+│                                                                          │
+│      # Compute target view loss                                          │
+│      tgt_loss = self.criterion(tgt_outputs, tgt_targets)                │
+│      target_losses.append(tgt_loss)                                     │
+└─────────────────────────────────────────────────────────────────────────┘
+
+STEP 5: Aggregate total loss
+┌─────────────────────────────────────────────────────────────────────────┐
+│  # Average target losses                                                 │
+│  avg_target_losses = {                                                   │
+│      'loss_ce_target': mean([l['loss_ce'] for l in target_losses]),     │
+│      'loss_mask_target': mean([l['loss_mask'] for l in target_losses]), │
+│      'loss_dice_target': mean([l['loss_dice'] for l in target_losses]), │
+│  }                                                                       │
+│                                                                          │
+│  # Total loss                                                            │
+│  total_losses = {                                                        │
+│      'loss_ce': ref_losses['loss_ce'],                                  │
+│      'loss_mask': ref_losses['loss_mask'],                              │
+│      'loss_dice': ref_losses['loss_dice'],                              │
+│      **avg_target_losses,                                                │
+│  }                                                                       │
+│                                                                          │
+│  # Sum all for backprop                                                  │
+│  total_loss = sum(total_losses.values())                                │
+└─────────────────────────────────────────────────────────────────────────┘
+
+
+═══════════════════════════════════════════════════════════════════════════
+LOSS FUNCTIONS
+═══════════════════════════════════════════════════════════════════════════
+
+Training Losses (per view):
+┌─────────────────────────────────────────────────────────────────────────┐
+│                                                                          │
+│  loss_ce (Cross-Entropy):                                                │
+│  ├─ Matches predicted queries to ground truth segments                  │
+│  ├─ Hungarian matching for assignment                                    │
+│  └─ Weight: cfg.MODEL.MASK_FORMER.CLASS_WEIGHT (default: 2.0)           │
+│                                                                          │
+│  loss_mask (Binary Mask):                                                │
+│  ├─ Sigmoid focal loss on mask predictions                              │
+│  ├─ Applied per matched query-segment pair                              │
+│  └─ Weight: cfg.MODEL.MASK_FORMER.MASK_WEIGHT (default: 5.0)            │
+│                                                                          │
+│  loss_dice (Dice):                                                       │
+│  ├─ Dice coefficient loss for mask quality                              │
+│  ├─ Handles class imbalance in masks                                    │
+│  └─ Weight: cfg.MODEL.MASK_FORMER.DICE_WEIGHT (default: 5.0)            │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+
+Total Loss Composition:
+┌─────────────────────────────────────────────────────────────────────────┐
+│                                                                          │
+│  L_total = L_ref + L_target_avg                                          │
+│                                                                          │
+│  Where:                                                                  │
+│    L_ref = loss_ce + loss_mask + loss_dice                              │
+│    L_target_avg = mean(loss_ce_target + loss_mask_target + loss_dice_target)│
+│                                                                          │
+│  NOTE: No KL divergence loss in training                                 │
+│  NOTE: No 3D consistency losses (removed for simplicity)                 │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+
+
+═══════════════════════════════════════════════════════════════════════════
+EVALUATION & LOGGING
+═══════════════════════════════════════════════════════════════════════════
+
+Evaluator: COCOPanopticEvaluator
+────────────────────────────────
+Runs periodically (every cfg.TEST.EVAL_PERIOD iterations)
+
+Metrics:
+  • PQ (Panoptic Quality) = SQ × RQ
+  • SQ (Segmentation Quality): IoU of matched segments
+  • RQ (Recognition Quality): F1 score of segment matching
+  • PQ_things: PQ for thing classes (instances)
+  • PQ_stuff: PQ for stuff classes (background)
+
+CSV Logging: CSVMetricsLogger Hook
+──────────────────────────────────
+
+Output Files:
+  1. training_metrics.csv
+     ├─ iteration
+     ├─ total_loss, loss_ce, loss_mask, loss_dice
+     ├─ loss_ce_target, loss_mask_target, loss_dice_target
+     ├─ learning_rate
+     └─ time_per_iter
+
+  2. evaluation_metrics.csv
+     ├─ iteration
+     ├─ PQ, SQ, RQ
+     ├─ PQ_things, PQ_stuff
+     └─ per-class metrics
+
+  3. view_analysis_metrics.csv (when using --view-analysis)
+     ├─ sample_id, scene_id
+     ├─ ref_loss_ce, ref_loss_mask, ref_loss_dice
+     ├─ tgt{i}_loss_ce, tgt{i}_loss_mask, tgt{i}_loss_dice (per target view)
+     └─ class_prob_kl_divergence (KL between ref and target class distributions)
+
+View Analysis Mode:
+───────────────────
+Activated with --view-analysis flag
+Provides detailed per-view breakdown for debugging query propagation
+
+
+═══════════════════════════════════════════════════════════════════════════
+INFERENCE FLOW
+═══════════════════════════════════════════════════════════════════════════
+
+Single-View Inference:
+┌─────────────────────────────────────────────────────────────────────────┐
+│  1. Process image through MapAnything (single view mode)                │
+│  2. Generate panoptic features via DPT head                             │
+│  3. Run standard Mask2Former decoding                                   │
+│  4. Post-process: merge overlapping masks, apply confidence threshold  │
+│  5. Output: panoptic segmentation map                                   │
+└─────────────────────────────────────────────────────────────────────────┘
+
+Multi-View Inference (with query propagation):
+┌─────────────────────────────────────────────────────────────────────────┐
+│  1. Process all N views through MapAnything (shared features)           │
+│  2. Select reference view (typically view with highest coverage)        │
+│  3. Decode reference view to get query embeddings                       │
+│  4. Propagate queries to all other views with alpha-blending            │
+│  5. Output: consistent panoptic segmentation for all views              │
+│  6. (Optional) Aggregate to 3D using depth + camera poses               │
+└─────────────────────────────────────────────────────────────────────────┘
+
+
+═══════════════════════════════════════════════════════════════════════════
+KEY FILES
+═══════════════════════════════════════════════════════════════════════════
+
+m2f_train_multiview.py (~2325 lines):
+  • MultiViewMask2Former - Main model class
+  • QueryPropagationTransformerDecoder - Decoder with alpha-blending
+  • MultiViewTrainer - Custom trainer with evaluation
+  • CSVMetricsLogger - Hook for CSV logging
+  • compute_view_metrics() - Per-view loss computation
+  • run_view_analysis() - Detailed view analysis mode
+
+scannetpp_panoptic_dataset_mapper.py (~1471 lines):
+  • ScanNetPPMultiViewDatasetMapper - Multi-view data loading
+  • render_depth_from_mesh() - Open3D raycasting
+  • load_or_render_depth() - Cached depth loading
+  • multiview_collate_fn() - Batch collation
+
+pretrained_models/map_anything/:
+  • model.pt - MapAnything weights
+  • config.yaml - MapAnything configuration
+
+
+═══════════════════════════════════════════════════════════════════════════
+CONFIGURATION
+═══════════════════════════════════════════════════════════════════════════
+
+Key Config Options:
+───────────────────
+
+Model:
+  MODEL.MASK_FORMER.NUM_OBJECT_QUERIES: 100
+  MODEL.MASK_FORMER.DEC_LAYERS: 9
+  MODEL.MASK_FORMER.HIDDEN_DIM: 256
+
+Multi-View:
+  INPUT.NUM_VIEWS: 4                    # Number of views per sample
+  INPUT.MIN_CAMERA_DISTANCE: 0.5        # Min distance between views (meters)
+  INPUT.LOAD_DEPTH: True                # Enable depth rendering
+  INPUT.DEPTH_CACHE_DIR: "depth_cache"  # Cache location
+
+Dataset Paths:
+  DATASETS.SCANNETPP_ROOT: "/path/to/scannetpp/data"
+  DATASETS.SCANNETPP_PANOPTIC_ROOT: "/path/to/panoptic_annotations"
+
+Training:
+  SOLVER.IMS_PER_BATCH: 8
+  SOLVER.BASE_LR: 0.0001
+  SOLVER.MAX_ITER: 90000
+  SOLVER.WARMUP_ITERS: 1000
+  TEST.EVAL_PERIOD: 5000
+
+
+═══════════════════════════════════════════════════════════════════════════
+TRAINING COMMANDS
+═══════════════════════════════════════════════════════════════════════════
+
+Basic Training:
+───────────────
+python m2f_train_multiview.py \
+    --config-file configs/scannetpp/panoptic-segmentation/multiview.yaml \
+    --num-gpus 4 \
+    SOLVER.IMS_PER_BATCH 8 \
+    SOLVER.BASE_LR 0.0001 \
+    SOLVER.MAX_ITER 90000 \
+    INPUT.NUM_VIEWS 4 \
+    INPUT.LOAD_DEPTH True \
+    OUTPUT_DIR output/multiview_experiment
+
+Resume Training:
+────────────────
+python m2f_train_multiview.py \
+    --config-file configs/scannetpp/panoptic-segmentation/multiview.yaml \
+    --resume \
+    MODEL.WEIGHTS output/multiview_experiment/model_0049999.pth
+
+View Analysis Mode:
+───────────────────
+python m2f_train_multiview.py \
+    --config-file configs/scannetpp/panoptic-segmentation/multiview.yaml \
+    --view-analysis \
+    MODEL.WEIGHTS output/multiview_experiment/model_final.pth \
+    OUTPUT_DIR output/view_analysis
+
+Evaluation Only:
+────────────────
+python m2f_train_multiview.py \
+    --config-file configs/scannetpp/panoptic-segmentation/multiview.yaml \
+    --eval-only \
+    MODEL.WEIGHTS output/multiview_experiment/model_final.pth
+
+
+═══════════════════════════════════════════════════════════════════════════
+NEXT STEPS / TODO
+═══════════════════════════════════════════════════════════════════════════
+
+1. Create ScanNet++ config file:
+   configs/scannetpp/panoptic-segmentation/multiview.yaml
+
+2. Verify dataset paths and structure match expected format
+
+3. Run initial training with small subset to validate pipeline
+
+4. Monitor training via CSV logs and tensorboard
+
+5. Tune alpha schedule for query propagation based on view analysis metrics
+
+6. Consider adding depth-based geometric priors if quality is insufficient

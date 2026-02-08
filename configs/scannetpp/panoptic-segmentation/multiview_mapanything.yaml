@@ -1,0 +1,123 @@
+# Multi-View Panoptic Segmentation on ScanNet++ with Query Propagation
+# 
+# This config uses:
+# - MapAnything backbone (frozen) for multi-view feature extraction
+# - Panoptic DPT head (trainable) for FPN-style features
+# - Mask2Former with Query Propagation (trainable) for panoptic prediction
+#
+# Training with 4 views per scene, query propagation from reference to targets
+
+_BASE_: Base-ScanNetPP-PanopticSegmentation.yaml
+
+MODEL:
+  META_ARCHITECTURE: "MultiViewMask2Former"
+  
+  # ========================================
+  # MAPANYTHING CHECKPOINT
+  # ========================================
+  MAPANYTHING:
+    CHECKPOINT_PATH: "pretrained_models/map_anything/test"
+  
+  # ========================================
+  # MULTI-VIEW CONFIGURATION
+  # ========================================
+  MULTIVIEW:
+    NUM_VIEWS: 8              # Number of views per scene (increased for better coverage)
+    USE_POSES: True           # Use camera poses in MapAnything
+    WARMUP_ITER: 1000         # Train views independently before query propagation
+    
+    # View selection parameters
+    MIN_CAMERA_DISTANCE: 0.3  # Minimum distance between cameras (meters)
+    MAX_CAMERA_DISTANCE: 5.0  # Maximum distance between cameras
+    MIN_OVERLAP: 0.2          # Minimum overlap between views (estimated)
+    MAX_OVERLAP: 0.8          # Maximum overlap between views
+  
+  # ========================================
+  # SEMANTIC SEGMENTATION HEAD
+  # ========================================
+  SEM_SEG_HEAD:
+    NAME: "MaskFormerHead"
+    IN_FEATURES: ["res2", "res3", "res4", "res5"]
+    IGNORE_VALUE: 255
+    
+    # Number of classes: ScanNet++ has 2878 semantic classes (fine-grained)
+    # See: https://scannetpp.mlsg.cit.tum.de/scannetpp/
+    NUM_CLASSES: 2878
+    
+    LOSS_WEIGHT: 1.0
+    CONVS_DIM: 256
+    MASK_DIM: 256
+    NORM: "GN"
+    
+    # Pixel decoder (MSDeformAttn)
+    PIXEL_DECODER_NAME: "MSDeformAttnPixelDecoder"
+    DEFORMABLE_TRANSFORMER_ENCODER_IN_FEATURES: ["res3", "res4", "res5"]
+    COMMON_STRIDE: 4
+    TRANSFORMER_ENC_LAYERS: 6
+  
+  # ========================================
+  # MASK2FORMER TRANSFORMER DECODER
+  # ========================================
+  MASK_FORMER:
+    TRANSFORMER_DECODER_NAME: "MultiScaleMaskedTransformerDecoder"
+    TRANSFORMER_IN_FEATURE: "multi_scale_pixel_decoder"
+    
+    # Deep supervision during training
+    DEEP_SUPERVISION: True
+    
+    # Loss weights
+    NO_OBJECT_WEIGHT: 0.1     # Weight for "no object" class
+    CLASS_WEIGHT: 2.0         # Cross-entropy weight
+    MASK_WEIGHT: 5.0          # Binary mask loss weight
+    DICE_WEIGHT: 5.0          # Dice loss weight
+    
+    # Transformer architecture
+    HIDDEN_DIM: 256
+    NUM_OBJECT_QUERIES: 100   # Max objects per image
+    NHEADS: 8
+    DROPOUT: 0.0
+    DIM_FEEDFORWARD: 2048
+    ENC_LAYERS: 0
+    PRE_NORM: False
+    ENFORCE_INPUT_PROJ: False
+    SIZE_DIVISIBILITY: 32
+    DEC_LAYERS: 10            # 9 decoder layers + 1 for learnable query
+    
+    # Point sampling for loss computation
+    TRAIN_NUM_POINTS: 12544   # 112 * 112 points
+    OVERSAMPLE_RATIO: 3.0
+    IMPORTANCE_SAMPLE_RATIO: 0.75
+    
+    # Testing thresholds
+    TEST:
+      SEMANTIC_ON: True
+      INSTANCE_ON: True
+      PANOPTIC_ON: True
+      OVERLAP_THRESHOLD: 0.8
+      OBJECT_MASK_THRESHOLD: 0.8
+
+# ========================================
+# INPUT CONFIGURATION (Multi-View)
+# ========================================
+INPUT:
+  # Depth loading for spatial bridging (warped attention masks)
+  LOAD_DEPTH: True
+  DEPTH_CACHE_DIR: null  # Set to a path to cache rendered depths (recommended)
+  
+  # Image size (ScanNet++ DSLR can be large, resize for memory)
+  IMAGE_SIZE: 640
+  FORMAT: "RGB"
+  
+  DATASET_MAPPER_NAME: "scannetpp_multiview"
+
+# ========================================
+# TRAINING SCHEDULE
+# ========================================
+SOLVER:
+  IMS_PER_BATCH: 4            # 4 scenes * 8 views = 32 images per batch (reduce if OOM)
+  BASE_LR: 0.0001
+  MAX_ITER: 90000
+  WARMUP_ITERS: 1000
+
+TEST:
+  EVAL_PERIOD: 5000

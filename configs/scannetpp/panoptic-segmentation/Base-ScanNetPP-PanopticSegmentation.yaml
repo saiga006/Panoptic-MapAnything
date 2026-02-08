@@ -1,0 +1,105 @@
+# Base configuration for ScanNet++ Panoptic Segmentation
+# Uses MapAnything backbone (frozen) + Panoptic DPT (trainable) + Mask2Former head
+
+MODEL:
+  BACKBONE:
+    FREEZE_AT: 0  # Not applicable - MapAnything handles freezing internally
+    NAME: "build_mapanything_multiview_backbone"
+  
+  # DINOv2 normalization (used by MapAnything)
+  PIXEL_MEAN: [123.675, 116.280, 103.530]  # ImageNet mean * 255
+  PIXEL_STD: [58.395, 57.120, 57.375]       # ImageNet std * 255
+
+# ========================================
+# DATASET CONFIGURATION
+# ========================================
+# NOTE: These paths must be set by the user
+DATASETS:
+  # Training dataset name (registered via register_scannetpp_panoptic)
+  TRAIN: ("scannetpp_panoptic_train",)
+  # Validation dataset name
+  TEST: ("scannetpp_panoptic_val",)
+
+# ========================================
+# SOLVER (Training) CONFIGURATION
+# ========================================
+SOLVER:
+  IMS_PER_BATCH: 8          # Reduce if GPU memory is limited
+  BASE_LR: 0.0001           # Base learning rate for AdamW
+  DPT_LR: 0.00001           # Learning rate for DPT head (10x lower)
+  
+  # Learning rate schedule (linear warmup + poly decay)
+  STEPS: (60000, 80000)     # When to decay LR
+  MAX_ITER: 90000           # Total training iterations
+  
+  # Warmup configuration
+  WARMUP_FACTOR: 0.001      # Start LR = BASE_LR * WARMUP_FACTOR
+  WARMUP_ITERS: 1000        # Warmup for first 1000 iterations
+  
+  # Regularization
+  WEIGHT_DECAY: 0.05
+  OPTIMIZER: "ADAMW"
+  BACKBONE_MULTIPLIER: 0.1  # Lower LR for backbone (though frozen)
+  
+  # Gradient clipping (important for transformer training)
+  # Per-parameter norm clipping via detectron2's built-in optimizer wrapper.
+  # Value=5.0 is standard for Mask2Former. Previous value of 1.0 combined
+  # with a duplicate GradientClippingHook caused double-clipping that
+  # over-dampened gradients and prevented mask logit recovery.
+  CLIP_GRADIENTS:
+    ENABLED: True
+    CLIP_TYPE: "norm"
+    CLIP_VALUE: 5.0         # Standard Mask2Former value (was 1.0 with double clipping)
+    NORM_TYPE: 2.0
+  
+  # Mixed precision training (saves memory)
+  AMP:
+    ENABLED: True
+
+# ========================================
+# INPUT CONFIGURATION
+# ========================================
+INPUT:
+  # ScanNet++ DSLR images are typically 1568x1168 after undistortion
+  # Resize to 640x480 for memory efficiency (adjust as needed)
+  IMAGE_SIZE: 640
+  MIN_SIZE_TRAIN: (480, 512, 544, 576, 608, 640)
+  MAX_SIZE_TRAIN: 800
+  MIN_SIZE_TEST: 640
+  MAX_SIZE_TEST: 800
+  
+  # Augmentation
+  MIN_SCALE: 0.5
+  MAX_SCALE: 1.5
+  CROP:
+    ENABLED: True
+    TYPE: "absolute"
+    SIZE: [480, 640]
+  
+  # Image format
+  FORMAT: "RGB"
+  
+  # Dataset mapper to use
+  DATASET_MAPPER_NAME: "scannetpp_multiview"
+
+# ========================================
+# EVALUATION CONFIGURATION
+# ========================================
+TEST:
+  EVAL_PERIOD: 5000   # Evaluate every 5000 iterations
+  DETECTIONS_PER_IMAGE: 100
+
+# ========================================
+# DATA LOADER CONFIGURATION
+# ========================================
+DATALOADER:
+  FILTER_EMPTY_ANNOTATIONS: True
+  NUM_WORKERS: 4
+  ASPECT_RATIO_GROUPING: False  # Multi-view batching handles this differently
+
+# ========================================
+# OUTPUT CONFIGURATION
+# ========================================
+OUTPUT_DIR: "./output/scannetpp_multiview"
+
+VERSION: 2

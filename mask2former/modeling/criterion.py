@@ -32,6 +32,9 @@ def dice_loss(
                  classification label for each element in inputs
                 (0 for the negative class and 1 for the positive class).
     """
+    # Clamp logits to prevent fp16 overflow in sigmoid
+    # sigmoid(-20) ≈ 2e-9 (effectively 0), no need for more extreme values
+    inputs = inputs.clamp(min=-20.0, max=20.0)
     inputs = inputs.sigmoid()
     inputs = inputs.flatten(1)
     numerator = 2 * (inputs * targets).sum(-1)
@@ -40,9 +43,11 @@ def dice_loss(
     return loss.sum() / num_masks
 
 
-dice_loss_jit = torch.jit.script(
-    dice_loss
-)  # type: torch.jit.ScriptModule
+# Re-JIT after adding logit clamping
+try:
+    dice_loss_jit = torch.jit.script(dice_loss)
+except Exception:
+    dice_loss_jit = dice_loss
 
 
 def sigmoid_ce_loss(
@@ -60,14 +65,19 @@ def sigmoid_ce_loss(
     Returns:
         Loss tensor
     """
+    # Clamp logits to prevent fp16 overflow in BCE
+    # For logit=-20, BCE ≈ 20 (already a large penalty), no benefit from more extreme
+    inputs = inputs.clamp(min=-20.0, max=20.0)
     loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
 
     return loss.mean(1).sum() / num_masks
 
 
-sigmoid_ce_loss_jit = torch.jit.script(
-    sigmoid_ce_loss
-)  # type: torch.jit.ScriptModule
+# Re-JIT after adding logit clamping
+try:
+    sigmoid_ce_loss_jit = torch.jit.script(sigmoid_ce_loss)
+except Exception:
+    sigmoid_ce_loss_jit = sigmoid_ce_loss
 
 
 def calculate_uncertainty(logits):
@@ -118,13 +128,18 @@ class SetCriterion(nn.Module):
         self.num_points = num_points
         self.oversample_ratio = oversample_ratio
         self.importance_sample_ratio = importance_sample_ratio
+        self._forward_count = 0  # Diagnostic counter
 
     def loss_labels(self, outputs, targets, indices, num_masks):
         """Classification loss (NLL)
         targets dicts must contain the key "labels" containing a tensor of dim [nb_target_boxes]
         """
         assert "pred_logits" in outputs
+        # Force float32 for cross-entropy to prevent fp16 overflow
+        # With 255 classes, softmax denominators can overflow fp16 range
         src_logits = outputs["pred_logits"].float()
+        # Clamp logits to prevent extreme values in softmax
+        src_logits = src_logits.clamp(min=-50.0, max=50.0)
 
         idx = self._get_src_permutation_idx(indices)
         target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
@@ -180,6 +195,11 @@ class SetCriterion(nn.Module):
             align_corners=False,
         ).squeeze(1)
 
+        # Force float32 for loss computation to prevent fp16 overflow/NaN
+        # in sigmoid/exp operations within BCE and dice loss
+        point_logits = point_logits.float()
+        point_labels = point_labels.float()
+
         losses = {
             "loss_mask": sigmoid_ce_loss_jit(point_logits, point_labels, num_masks),
             "loss_dice": dice_loss_jit(point_logits, point_labels, num_masks),
@@ -220,6 +240,37 @@ class SetCriterion(nn.Module):
 
         # Retrieve the matching between the outputs of the last layer and the targets
         indices = self.matcher(outputs_without_aux, targets)
+
+        # ====== DIAGNOSTIC LOGGING (first 10 forward calls) ======
+        self._forward_count += 1
+        if self._forward_count <= 10:
+            n_gt = [len(t["labels"]) for t in targets]
+            gt_labels = [t["labels"].tolist() for t in targets]
+            gt_mask_sums = []
+            for t in targets:
+                sums = [m.sum().item() for m in t["masks"]]
+                gt_mask_sums.append(sums[:5])  # First 5 only
+            # Check matching quality
+            matched_src = [i.tolist()[:5] for i, _ in indices]
+            matched_tgt = [j.tolist()[:5] for _, j in indices]
+            # Check pred logits
+            pred_logits = outputs_without_aux["pred_logits"]
+            pred_probs = pred_logits.softmax(-1)
+            max_probs = pred_probs.max(-1).values
+            # Check pred masks
+            pred_masks = outputs_without_aux["pred_masks"]
+            print(f"\n{'='*60}")
+            print(f"[CRITERION DIAG #{self._forward_count}] num_classes={self.num_classes}")
+            print(f"  GT objects per sample: {n_gt}")
+            print(f"  GT labels (first 5): {[l[:5] for l in gt_labels]}")
+            print(f"  GT mask pixel sums (first 5): {gt_mask_sums}")
+            print(f"  Matched src indices (first 5): {matched_src}")
+            print(f"  Matched tgt indices (first 5): {matched_tgt}")
+            print(f"  Pred logits shape: {pred_logits.shape}, range: [{pred_logits.min():.2f}, {pred_logits.max():.2f}]")
+            print(f"  Pred softmax max prob: mean={max_probs.mean():.4f}, max={max_probs.max():.4f}")
+            print(f"  Pred masks shape: {pred_masks.shape}, range: [{pred_masks.min():.2f}, {pred_masks.max():.2f}]")
+            print(f"  Pred masks sigmoid mean: {pred_masks.sigmoid().mean():.4f}")
+            print(f"{'='*60}")
 
         # Compute the average number of target boxes accross all nodes, for normalization purposes
         num_masks = sum(len(t["labels"]) for t in targets)

@@ -1,0 +1,131 @@
+_BASE_: Base-ScanNetPP-PanopticSegmentation.yaml
+
+# ========================================
+# MEMORY OPTIMIZATIONS FOR A40 (48GB) - 16 GPU CONFIG
+# ========================================
+
+MODEL:
+  META_ARCHITECTURE: "MultiViewMask2Former"
+  
+  # ========================================
+  # MAPANYTHING CHECKPOINT
+  # ========================================
+  MAPANYTHING:
+    CHECKPOINT_PATH: "pretrained_models/map_anything/test"
+  
+  # ========================================
+  # MULTI-VIEW CONFIGURATION
+  # ========================================
+  MULTIVIEW:
+    NUM_VIEWS: 3  # Reduced from 3 (33% memory saving)
+    USE_POSES: True
+    WARMUP_ITER: 500
+    
+    # View selection parameters
+    MIN_CAMERA_DISTANCE: 0.3  # Minimum distance between cameras (meters)
+    MAX_CAMERA_DISTANCE: 5.0  # Maximum distance between cameras
+    MIN_OVERLAP: 0.2          # Minimum overlap between views (estimated)
+    MAX_OVERLAP: 0.8          # Maximum overlap between views
+  
+  # ========================================
+  # SEMANTIC SEGMENTATION HEAD
+  # ========================================
+  SEM_SEG_HEAD:
+    NAME: "MaskFormerHead"
+    IN_FEATURES: ["res2", "res3", "res4", "res5"]
+    IGNORE_VALUE: 255
+    NUM_CLASSES: 2878
+    
+    LOSS_WEIGHT: 1.0
+    CONVS_DIM: 256
+    MASK_DIM: 256
+    NORM: "GN"
+    
+    # Pixel decoder (MSDeformAttn)
+    PIXEL_DECODER_NAME: "MSDeformAttnPixelDecoder"
+    DEFORMABLE_TRANSFORMER_ENCODER_IN_FEATURES: ["res3", "res4", "res5"]
+    COMMON_STRIDE: 4
+    TRANSFORMER_ENC_LAYERS: 6
+  
+  # ========================================
+  # MASK2FORMER TRANSFORMER DECODER
+  # ========================================
+  MASK_FORMER:
+    TRANSFORMER_DECODER_NAME: "MultiScaleMaskedTransformerDecoder"
+    TRANSFORMER_IN_FEATURE: "multi_scale_pixel_decoder"
+    
+    # Deep supervision during training
+    DEEP_SUPERVISION: True
+    
+    # Loss weights (matched to stable single-view training)
+    NO_OBJECT_WEIGHT: 0.1
+    CLASS_WEIGHT: 5.0         # CRITICAL: was 2.0, caused NaN instability
+    MASK_WEIGHT: 5.0
+    DICE_WEIGHT: 5.0
+    
+    # Transformer architecture (full capacity for 16-GPU distributed training)
+    NUM_OBJECT_QUERIES: 100  # Full capacity (tested at 25GB on single GPU)
+    DEC_LAYERS: 10  # Full Mask2Former depth
+    HIDDEN_DIM: 256
+    NHEADS: 8
+    DROPOUT: 0.0
+    DIM_FEEDFORWARD: 2048
+    ENC_LAYERS: 0
+    PRE_NORM: False
+    ENFORCE_INPUT_PROJ: False
+    SIZE_DIVISIBILITY: 32
+    
+    # Point sampling for loss computation
+    TRAIN_NUM_POINTS: 12544   # 112 * 112 points (CRITICAL: prevents NaN in matcher)
+    OVERSAMPLE_RATIO: 3.0
+    IMPORTANCE_SAMPLE_RATIO: 0.75
+    
+    # Testing thresholds
+    TEST:
+      SEMANTIC_ON: True
+      INSTANCE_ON: True
+      PANOPTIC_ON: True
+      OVERLAP_THRESHOLD: 0.8
+      OBJECT_MASK_THRESHOLD: 0.8
+
+# ========================================
+# INPUT CONFIGURATION (Multi-View)
+# ========================================
+INPUT:
+  # Image size - REDUCED for A40 memory (48GB with 3 views per scene)
+  # Original DSLR images are ~4000x6000, these get resized
+  MIN_SIZE_TRAIN: (384, 416, 448, 480)  # Smaller range for memory
+  MAX_SIZE_TRAIN: 640                    # Reduced from 800
+  MIN_SIZE_TEST: 480
+  MAX_SIZE_TEST: 640
+  
+  FORMAT: "RGB"
+  LOAD_DEPTH: True
+  DEPTH_CACHE_DIR: null
+  DATASET_MAPPER_NAME: "scannetpp_multiview"
+
+# ========================================
+# TRAINING SCHEDULE (16-GPU CONFIG)
+# ========================================
+SOLVER:
+  # Memory-optimized: 8 scenes total for 16 GPUs (0.5 per GPU effective)
+  # Each GPU processes 1 scene with 3 views, but only 8 GPUs active per step
+  # This reduces peak memory vs IMS_PER_BATCH: 16
+  IMS_PER_BATCH: 8            # 8 scenes total (fits in A40 48GB memory)
+  BASE_LR: 0.00028            # Scaled by sqrt(8) ≈ 2.8
+  MAX_ITER: 11250             # 90000 / 8 = 11250 iterations
+  
+  # Learning rate schedule
+  STEPS: (7500, 10000)        # Decay at 2/3 and ~90% of training
+  WARMUP_FACTOR: 0.001
+  WARMUP_ITERS: 1000
+  
+  CHECKPOINT_PERIOD: 2000
+
+DATALOADER:
+  NUM_WORKERS: 4              # Reduce to save CPU memory
+
+TEST:
+  EVAL_PERIOD: 2000           # Adjusted for 8-GPU training
+
+OUTPUT_DIR: "./output_multiview_8a40"
