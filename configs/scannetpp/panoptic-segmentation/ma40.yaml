@@ -82,9 +82,9 @@ MODEL:
     # mask weight to 2.0 while keeping dice at 5.0 gives dice 2.5x more
     # influence, allowing matched queries to maintain positive predictions.
     NO_OBJECT_WEIGHT: 0.1     # Weight for "no object" class
-    CLASS_WEIGHT: 1.0         # Cross-entropy weight
-    MASK_WEIGHT: 2.0            # Binary mask loss weight (reduced from 5.0)
-    DICE_WEIGHT: 5.0            # Dice loss weight (strong anti-collapse)
+    CLASS_WEIGHT: 2.0         # Cross-entropy weight (increased for better classification)
+    MASK_WEIGHT: 5.0            # Binary mask loss weight (primary mask supervision)
+    DICE_WEIGHT: 5.0            # Dice loss weight (matched with mask_weight for strong foreground pressure)
     
     # Transformer architecture
     HIDDEN_DIM: 256
@@ -115,9 +115,9 @@ MODEL:
 # INPUT CONFIGURATION (Multi-View)
 # ========================================
 INPUT:
-  # Depth loading for spatial bridging (warped attention masks)
-  LOAD_DEPTH: True
-  DEPTH_CACHE_DIR: null  # Set to a path to cache rendered depths (recommended)
+  # Depth loading DISABLED (warped attention mechanism disabled - only query propagation used)
+  LOAD_DEPTH: False
+  DEPTH_CACHE_DIR: null  # Not used when LOAD_DEPTH is False
   
   # Image size - REDUCED for A40 memory (48GB with 3 views per scene)
   # Original DSLR images are ~4000x6000, these get resized
@@ -137,13 +137,21 @@ SOLVER:
   # Each GPU processes 1 scene with 3 views, but only 4 GPUs active per step
   # This reduces peak memory vs IMS_PER_BATCH: 8
   IMS_PER_BATCH: 4            # 4 scenes total (fits in A40 48GB memory)
-  BASE_LR: 0.0001             # Base LR for batch size 4
+  BASE_LR: 0.00003            # Reduced from 1e-4 to 3e-5 for stability
+  DPT_LR: 0.000003            # Proportional to BASE_LR
   MAX_ITER: 22500             # 90000 / 4 = 22500 iterations
   
   # Learning rate schedule
   STEPS: (15000, 20000)       # Decay at 2/3 and ~90% of training
   WARMUP_FACTOR: 0.001
-  WARMUP_ITERS: 1000
+  WARMUP_ITERS: 500           # Reduced warmup
+  
+  # Gradient clipping for stability
+  CLIP_GRADIENTS:
+    ENABLED: True
+    CLIP_TYPE: "norm"
+    CLIP_VALUE: 3.0           # Relaxed from 1.0 (was saturating every step, killing gradient signal)
+    NORM_TYPE: 2.0
   
   CHECKPOINT_PERIOD: 1500
 

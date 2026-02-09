@@ -78,7 +78,8 @@ python3 m2f_train_multiview.py \
     --scannetpp-root $SCANNETPP_ROOT \
     --panoptic-root $PANOPTIC_ROOT \
     --split-dir $SPLIT_DIR \
-    OUTPUT_DIR output_multiview_8a40
+    --pretrained-single-view output_cluster/model_final.pth \
+    OUTPUT_DIR output_multiview_pret40
 
 echo ""
 echo "Training completed at $(date)"

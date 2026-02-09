@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=panoptic_infer_sp  # Job name
+#SBATCH --job-name=panoptic_eval  # Job name
 #SBATCH --partition=gpu4            # Partition: 'gpu4' (A100) or 'gpu' (V100)
 #SBATCH --nodes=1                  # Number of nodes
 #SBATCH --cpus-per-task=32         # CPU cores per task (adjust based on availability)
@@ -10,7 +10,15 @@
 #SBATCH --error=slurm_%j.err       # Standard error log
 
 # =============================================================================
-# ENVIRONMENT SETUP
+# EVALUATION SCRIPT FOR MULTI-VIEW MASK2FORMER ON SCANNET++ VALIDATION SET
+#
+# Computes PQ, SQ, RQ metrics on panoptic_val annotations.
+#
+# Usage:
+#   sbatch eval_job.sh
+#
+# To override the checkpoint path:
+#   sbatch --export=ALL,CHECKPOINT=/path/to/model_final.pth eval_job.sh
 # =============================================================================
 
 # 1. Load necessary modules (adjust versions if needed)
@@ -70,17 +78,48 @@ export SCANNETPP_ROOT=${MASK2FORMER_ROOT}/datasets/scannet/scannetpp
 export PANOPTIC_ROOT=${SCANNETPP_ROOT}/panoptic
 export PANOPTIC_VAL_ROOT=${SCANNETPP_ROOT}/panoptic_val
 export SPLIT_DIR=${SCANNETPP_ROOT}/splits
+export VAL_SPLIT=${SPLIT_DIR}/nvs_sem_val_clean.txt
 
-python m2f_inference.py \
-    --scene ${SCANNETPP_ROOT}/data/2e74812d00 \
-    --model  output_multiview_pret40/model_final.pth \
-    --config configs/scannetpp/panoptic-segmentation/ma40.yaml \
-    --num-views 3 \
-    --output output_inference \
-    --panoptic-dir ${SCANNETPP_ROOT}/panoptic \
-    --mask-threshold 0.3
+cd ${MASK2FORMER_ROOT}
+
+# ===========================
+# CONFIGURE THESE PATHS
+# ===========================
+# Path to the config file used during training
+CONFIG_FILE="configs/scannetpp/panoptic-segmentation/ma40.yaml"
+
+# Path to the trained checkpoint
+# Override via environment variable CHECKPOINT or edit here
+CHECKPOINT=${CHECKPOINT:-"output_multiview_8a40_warped_attention/model_final.pth"}
+
+# Output directory for evaluation results
+OUTPUT_DIR=${OUTPUT_DIR:-"eval_results/$(date +%Y%m%d_%H%M%S)"}
 
 echo ""
-echo "Training completed at $(date)"
+echo "Config: ${CONFIG_FILE}"
+echo "Checkpoint: ${CHECKPOINT}"
+echo "Output dir: ${OUTPUT_DIR}"
+echo "Val split: ${VAL_SPLIT}"
+echo "Panoptic val root: ${PANOPTIC_VAL_ROOT}"
 echo ""
 
+# Run evaluation
+python m2f_evaluate.py \
+    --config-file ${CONFIG_FILE} \
+    --checkpoint ${CHECKPOINT} \
+    --output-dir ${OUTPUT_DIR} \
+    --scannetpp-root ${SCANNETPP_ROOT} \
+    --panoptic-val-root ${PANOPTIC_VAL_ROOT} \
+    --val-split ${VAL_SPLIT} \
+    --target-short-edge 480 \
+    --max-size 640 \
+    --overlap-threshold 0.8 \
+    --object-mask-threshold 0.8 \
+    --save-predictions \
+    MODEL.WEIGHTS ${CHECKPOINT}
+
+echo ""
+echo "========================================="
+echo "Evaluation completed at $(date)"
+echo "Results saved to: ${OUTPUT_DIR}"
+echo "========================================="

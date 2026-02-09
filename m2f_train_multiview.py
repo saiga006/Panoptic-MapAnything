@@ -1553,6 +1553,125 @@ class MultiViewMask2Former(nn.Module):
     def device(self):
         return next(self.parameters()).device
 
+    def load_single_view_pretrained(self, checkpoint_path: str):
+        """
+        Load pretrained weights from a single-view Mask2Former checkpoint.
+        
+        Transfers:
+          - backbone.panoptic_dpt.*  (DPT feature fusion head)
+          - sem_seg_head.pixel_decoder.*  (MSDeformAttn pixel decoder)
+          - sem_seg_head.predictor.*  (transformer decoder, mask_embed,
+            query_embed, query_feat, level_embed — EXCEPT class_embed)
+        
+        Skips:
+          - backbone.mapanything.*  (frozen; reloaded from MapAnything ckpt)
+          - sem_seg_head.predictor.class_embed.*  (shape mismatch:
+            single-view has [134, 256] for COCO 133 classes,
+            multi-view needs [255, 256] for ScanNet++ 254 classes)
+          - criterion.*  (rebuilt from config)
+        """
+        import sys
+        
+        def log(msg):
+            """Print with flush to ensure SLURM captures output immediately."""
+            print(msg, flush=True)
+            sys.stdout.flush()
+        
+        log(f"\n{'='*60}")
+        log(f"TRANSFER LEARNING: Loading single-view pretrained weights")
+        log(f"  Checkpoint: {checkpoint_path}")
+        log(f"{'='*60}")
+        
+        # Load checkpoint
+        ckpt = torch.load(checkpoint_path, map_location="cpu")
+        if "model" in ckpt:
+            src_state = ckpt["model"]
+        else:
+            src_state = ckpt
+        
+        log(f"  Checkpoint loaded: {len(src_state)} keys")
+        
+        # Get current model state dict
+        model_state = self.state_dict()
+        log(f"  Current model: {len(model_state)} keys")
+        
+        matched = []
+        skipped_prefix = []
+        skipped_class_embed = []
+        skipped_shape = []
+        skipped_missing = []
+        
+        for key, src_tensor in src_state.items():
+            # Skip frozen MapAnything backbone (reloaded from its own ckpt)
+            if key.startswith("backbone.mapanything."):
+                skipped_prefix.append(key)
+                continue
+            
+            # Skip criterion (rebuilt from config with correct num_classes)
+            if key.startswith("criterion."):
+                skipped_prefix.append(key)
+                continue
+            
+            # Skip class_embed (shape mismatch: 134 vs 255)
+            if "class_embed" in key:
+                skipped_class_embed.append(key)
+                continue
+            
+            # Check if key exists in current model
+            if key not in model_state:
+                skipped_missing.append(key)
+                continue
+            
+            # Check shape match
+            if src_tensor.shape != model_state[key].shape:
+                skipped_shape.append((key, src_tensor.shape, model_state[key].shape))
+                continue
+            
+            # Match! Copy weight
+            model_state[key] = src_tensor
+            matched.append(key)
+        
+        # Load the updated state dict
+        self.load_state_dict(model_state, strict=True)
+        
+        # Verify key groups transferred
+        dpt_count = sum(1 for k in matched if k.startswith("backbone.panoptic_dpt."))
+        pixel_dec_count = sum(1 for k in matched if k.startswith("sem_seg_head.pixel_decoder."))
+        predictor_count = sum(1 for k in matched if k.startswith("sem_seg_head.predictor."))
+        
+        # Report with print() + flush to guarantee visibility in SLURM logs
+        log(f"\n{'='*60}")
+        log(f"TRANSFER LEARNING SUMMARY:")
+        log(f"  ✓ Matched & loaded:      {len(matched)}")
+        log(f"    - backbone.panoptic_dpt.*:      {dpt_count} keys")
+        log(f"    - sem_seg_head.pixel_decoder.*:  {pixel_dec_count} keys")
+        log(f"    - sem_seg_head.predictor.*:      {predictor_count} keys")
+        log(f"  ⊘ Skipped (frozen backbone+criterion): {len(skipped_prefix)}")
+        log(f"  ⊘ Skipped (class_embed mismatch):      {len(skipped_class_embed)}")
+        log(f"  ⊘ Skipped (shape mismatch):            {len(skipped_shape)}")
+        log(f"  ⊘ Skipped (not in model):              {len(skipped_missing)}")
+        log(f"{'='*60}")
+        
+        if skipped_shape:
+            for k, src_s, dst_s in skipped_shape:
+                log(f"  ⚠ Shape mismatch: {k}  src={list(src_s)} dst={list(dst_s)}")
+        
+        if skipped_missing and len(skipped_missing) <= 10:
+            for k in skipped_missing:
+                log(f"  ⚠ Not in model: {k}")
+        elif skipped_missing:
+            for k in skipped_missing[:5]:
+                log(f"  ⚠ Not in model: {k}")
+            log(f"  ... and {len(skipped_missing) - 5} more")
+        
+        if dpt_count == 0:
+            log("  ✗ ERROR: No DPT weights transferred! Check checkpoint format.")
+        if predictor_count == 0:
+            log("  ✗ ERROR: No predictor weights transferred! Check checkpoint format.")
+        
+        log(f"✓ Transfer learning complete: {len(matched)} weights loaded successfully.")
+        log(f"{'='*60}\n")
+
     def _build_criterion(self, cfg):
         """Build the Mask2Former loss criterion."""
         # Loss weights
@@ -1906,33 +2025,16 @@ class MultiViewMask2Former(nn.Module):
             target_mask_features, target_multi_scale_features = self._run_pixel_decoder(target_features)
             
             if do_propagation:
-                # Get target view's pose
-                tgt_pose = camera_poses[:, v_idx]      # [B, 4, 4]
-                tgt_depth = depth[:, v_idx] if has_depth else None # [B, 1, H, W]
-                
-                # SPATIAL BRIDGING: Warp reference masks to target view
-                warped_attn_mask = None
-                if has_depth and ref_depth is not None:
-                    # Create warped attention mask for target decoder
-                    target_H, target_W = target_multi_scale_features[0].shape[-2:]
-                    warped_attn_mask = create_warped_attention_mask(
-                        ref_pred_masks=ref_pred_masks,
-                        ref_depth=ref_depth,
-                        ref_pose=ref_pose,
-                        tgt_pose=tgt_pose,
-                        intrinsics=ref_intrinsic,  # Assume same intrinsics
-                        target_size=(target_H, target_W),
-                        tgt_depth=tgt_depth,       # Pass target depth for robust backward warping
-                        mask_threshold=0.5,
-                    )
-                
-                # KEY: Propagate queries + warped attention mask from reference view
+                # QUERY PROPAGATION ONLY (warped attention mask DISABLED)
+                # We pass ref_queries as initial queries but let the decoder
+                # use its own predicted attention masks (standard Mask2Former behavior).
+                # Warped geometric attention and alpha blending are disabled.
                 target_outputs = self.query_propagation_decoder(
                     target_multi_scale_features,
                     target_mask_features,
                     mask=None,
                     initial_query_feat=ref_queries,      # Use reference view's refined queries
-                    initial_attn_mask=warped_attn_mask,  # Use warped mask for spatial bridging
+                    initial_attn_mask=None,              # DISABLED: No warped attention mask
                 )
             else:
                 # During warmup, use learnable queries (each view learns independently)
@@ -1950,22 +2052,27 @@ class MultiViewMask2Former(nn.Module):
         
         # ========================================
         # Step 3: Aggregate Losses
+        # CRITICAL FIX: Scale losses to prevent gradient explosion
         # ========================================
         total_losses = {}
         
+        N = len(target_losses_list) + 1  # Total views (ref + targets)
+        ref_weight = 1.0                 # Reference at full weight
+        target_weight = 1.0 / N          # Scale targets: 1/3 for 3 views
+        
         # Reference view losses (full weight)
         for key, val in ref_losses.items():
-            total_losses[key] = val
+            total_losses[key] = val * ref_weight
         
-        # Target view losses (averaged)
+        # Target view losses (averaged, then scaled by 1/N)
         if target_losses_list:
             for key in target_losses_list[0].keys():
                 target_loss_sum = sum(tl[key] for tl in target_losses_list)
                 target_loss_avg = target_loss_sum / len(target_losses_list)
-                # Add as separate loss for monitoring (DETACHED to avoid double counting in backward)
+                # Monitor target losses (DETACHED to avoid double counting in backward)
                 total_losses[f'{key}_target'] = target_loss_avg.detach()
-                # Also add to main loss (Backprop flows through here)
-                total_losses[key] = total_losses.get(key, 0) + target_loss_avg
+                # Add scaled target losses to main loss (Backprop flows through here)
+                total_losses[key] = total_losses.get(key, 0) + (target_loss_avg * target_weight)
         
         # Store detailed metrics for analysis (optional, for debugging)
         if hasattr(self, '_store_view_metrics') and self._store_view_metrics:
@@ -2122,28 +2229,13 @@ class MultiViewMask2Former(nn.Module):
             # Run pixel decoder
             target_mask_features, target_multi_scale_features = self._run_pixel_decoder(target_features)
             
-            # Warp attention mask if depth available
-            warped_attn_mask = None
-            if has_depth and ref_depth is not None:
-                tgt_pose = camera_poses[:, v_idx]
-                target_H, target_W = target_multi_scale_features[0].shape[-2:]
-                warped_attn_mask = create_warped_attention_mask(
-                    ref_pred_masks=ref_pred_masks,
-                    ref_depth=ref_depth,
-                    ref_pose=ref_pose,
-                    tgt_pose=tgt_pose,
-                    intrinsics=ref_intrinsic,
-                    target_size=(target_H, target_W),
-                    mask_threshold=0.5,
-                )
-            
-            # Run with propagated queries
+            # QUERY PROPAGATION ONLY (warped attention mask DISABLED)
             target_outputs = self.query_propagation_decoder(
                 target_multi_scale_features,
                 target_mask_features,
                 mask=None,
                 initial_query_feat=ref_queries,
-                initial_attn_mask=warped_attn_mask,
+                initial_attn_mask=None,              # DISABLED: No warped attention mask
             )
             
             target_pred_logits = target_outputs['pred_logits']  # [B, Q, C+1]
@@ -2292,20 +2384,18 @@ def setup_cfg(args):
                 os.path.dirname(args.scannetpp_root), "panoptic"
             )
     
-    # Enable Gradient Clipping to prevent NaN/inf gradients
-    # IMPORTANT: Per-parameter norm clipping at 1.0 was too aggressive — it
-    # saturated every step (all grad norms = exactly 1.0), killing the weak
-    # dice gradients that need to resist the BCE "predict nothing" collapse.
-    # Increase to 5.0 so clipping only fires during genuine gradient explosion,
-    # not on every normal training step.
+    # Enable Gradient Clipping to prevent NaN/inf gradients.
+    # Only set defaults if the YAML config didn't already specify them.
+    # The YAML CLIP_VALUE takes priority (e.g. ma40.yaml sets 1.0).
     try:
         cfg.defrost()
     except:
         pass
     cfg.SOLVER.CLIP_GRADIENTS.ENABLED = True
     cfg.SOLVER.CLIP_GRADIENTS.CLIP_TYPE = "norm"
-    cfg.SOLVER.CLIP_GRADIENTS.CLIP_VALUE = 5.0   # Relaxed: was 1.0 (saturating every step)
     cfg.SOLVER.CLIP_GRADIENTS.NORM_TYPE = 2.0
+    # Don't override CLIP_VALUE — respect whatever the YAML config set.
+    # If the YAML didn't set it, detectron2's default (1.0) applies.
     
     # Set multi-view backbone
     try:
@@ -2765,6 +2855,18 @@ class MultiViewTrainer(DefaultTrainer):
     def __init__(self, cfg):
         super().__init__(cfg)
         
+        # Load single-view pretrained weights if specified
+        # This must happen AFTER super().__init__() creates the model,
+        # but BEFORE resume_or_load() which might overwrite with multi-view checkpoint
+        if hasattr(cfg, 'PRETRAINED_SINGLE_VIEW') and cfg.PRETRAINED_SINGLE_VIEW:
+            # Unwrap DDP if necessary
+            model = self.model.module if hasattr(self.model, 'module') else self.model
+            print(f"[TRANSFER LEARNING] Calling load_single_view_pretrained on {type(model).__name__}...", flush=True)
+            model.load_single_view_pretrained(cfg.PRETRAINED_SINGLE_VIEW)
+            print(f"[TRANSFER LEARNING] Done.", flush=True)
+        else:
+            print(f"[TRANSFER LEARNING] No pretrained checkpoint specified, training from scratch.", flush=True)
+        
         # Register NaN gradient safety hook (runs before optimizer step)
         # NOTE: Actual gradient clipping is handled by detectron2's built-in
         # maybe_add_gradient_clipping() which wraps the optimizer automatically
@@ -3118,6 +3220,15 @@ def main(args):
 
     cfg = setup_cfg(args)
     
+    # Pass pretrained checkpoint path through config (temporary attribute)
+    if hasattr(args, 'pretrained_single_view') and args.pretrained_single_view:
+        try:
+            cfg.defrost()
+        except:
+            pass
+        cfg.PRETRAINED_SINGLE_VIEW = args.pretrained_single_view
+        cfg.freeze()
+    
     if args.eval_only:
         model = MultiViewTrainer.build_model(cfg)
         DetectionCheckpointer(model, save_dir=cfg.OUTPUT_DIR).resume_or_load(
@@ -3131,7 +3242,10 @@ def main(args):
             res = MultiViewTrainer.test(cfg, model)
         return res
     
+    # Create trainer (transfer learning happens inside __init__)
     trainer = MultiViewTrainer(cfg)
+    
+    # Resume training or load final checkpoint
     trainer.resume_or_load(resume=args.resume)
     return trainer.train()
 
@@ -3144,6 +3258,16 @@ if __name__ == "__main__":
         "--view-analysis",
         action="store_true",
         help="Run detailed per-view analysis during evaluation"
+    )
+    
+    # Transfer learning from single-view checkpoint
+    parser.add_argument(
+        "--pretrained-single-view",
+        type=str,
+        default=None,
+        help="Path to a single-view Mask2Former checkpoint (e.g. output_cluster/model_final.pth). "
+             "Transfers DPT head + pixel decoder + transformer decoder weights to initialize "
+             "the multi-view model. Skips class_embed (shape mismatch) and frozen backbone."
     )
     
     # ========================================
