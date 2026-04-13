@@ -22,9 +22,7 @@ Current 3D panoptic scene segmentation approaches rely on specific inputs such a
 
 ## Methodology
 
-Our approach involves a unified feed-forward pipeline broken down into the following stages:
-
-
+**Our approach involves a unified feed-forward pipeline broken down into the following stages:**
 <p align="center">
   <img src="assets/panoptic_detailed_arch.png" width="80%" alt="Detailed Architecture">
 </p>
@@ -47,7 +45,7 @@ Our approach involves a unified feed-forward pipeline broken down into the follo
   * *Transformer Decoder & Query Propagation*: Initializes 100 learnable object queries. We enforce multi-view consistency through a **Query Propagation Mechanism**, where target views accept the reference view's refined query embeddings. This ensures that a specific query (e.g., Query #5) tracks the exact same semantic entity across all overlapping frames.
  
 <p align="center">
-  <img src="assets/query-propagation.drawio.png" width="70%" alt="Query Propagation Mechanism">
+  <img src="assets/query-propagation.drawio.png" width="80%" alt="Query Propagation Mechanism">
 </p>
 
 **3. Loss Calculation**
