@@ -54,6 +54,29 @@ The total loss formulation avoids costly test-time optimization. It is computed 
 **4. Evaluation**
 The model's performance is measured using the standard COCO Panoptic Evaluator, extracting PQ (Panoptic Quality), SQ (Segmentation Quality), and RQ (Recognition Quality) metrics.
 
+## Repository Structure
+
+```text
+.
+├── assets/             # Images and architecture diagrams used in the README
+│   ├── 3d_point_cloud_segmentation.png
+│   ├── panoptic_detailed_arch.png
+│   ├── panoptic-mapanything_architecture.drawio.png
+│   ├── panoptic_mapanything_overview.svg
+│   ├── predicted_2d_views.png
+│   └── query-propagation.drawio.png
+├── Poster/             # Presented Project Poster with details
+│   └── Panoptic_MapAnything_Poster_Ramamoorthy_Cuthinho.pdf
+├── Presentation/       # Slide decks for project milestones (Mid term & Initial Proposal)
+│   ├── Mid-Term_slides_PLR-Lab_Cuthinho-Mukkundan.pdf
+│   └── PanSt3R_PLR-Lab_Cuthinho-Mukkundan.pdf
+├── Report/             # Detailed academic lab reports (Mid term & Final)
+│   ├── Mid_term_Report_PLR_Lab_Cuthinho_Mukkundan_Panoptic_MapAnything.pdf
+│   └── Panoptic_MapAnything_PLR_Lab_Report.pdf
+├── LICENSE
+└── README.md
+```
+
 ## Acknowledgement
 
 This project was done as part of Uni Bonn Coursework, **Perception and Learning for Robotics Lab**. We would like to thank our supervisors, [Prof. Dr. Hermann Blum](mailto:blumh@uni-bonn.de) and [Sami Azirar, MSc](mailto:sazirar@uni-bonn.de), for providing valuable guidance and support during this project.
