@@ -33,7 +33,7 @@ The model's performance is measured using the standard COCO Panoptic Evaluator, 
 
 ## Acknowledgement
 
-We would like to thank our supervisors, [Prof. Dr. Hermann Blum](mailto:blumh@uni-bonn.de) and [Sami Azirar, MSc](mailto:sazirar@uni-bonn.de), for providing valuable guidance and support during this project.
+This project was done as part of Uni Bonn Coursework, **Perception and Learning for Robotics Lab**. We would like to thank our supervisors, [Prof. Dr. Hermann Blum](mailto:blumh@uni-bonn.de) and [Sami Azirar, MSc](mailto:sazirar@uni-bonn.de), for providing valuable guidance and support during this project.
 
 ## Contributors
 
