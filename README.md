@@ -9,8 +9,8 @@ Current 3D panoptic scene segmentation approaches rely on specific inputs such a
 ## Qualitative Results
 
 <p align="center">
-  <img src="assets/3d_point_cloud_segmentation.png" width="48%" alt="3D Point Cloud Segmentation">
-  <img src="assets/predicted_2d_views.png" width="48%" alt="Predicted 2D Views">
+  <img src="assets/3d_point_cloud_segmentation.png" width="100%" alt="3D Point Cloud Segmentation">
+  <img src="assets/predicted_2d_views.png" width="100%" alt="Predicted 2D Views">
 </p>
 
 ## Key Highlights
