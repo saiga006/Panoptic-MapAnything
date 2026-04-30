@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
 """
-Standalone Evaluation Script for Multi-View Mask2Former on ScanNet++
+Multi-View Evaluation Script for Multi-View Mask2Former on ScanNet++
 
 Computes Panoptic Quality (PQ), Segmentation Quality (SQ), and
-Recognition Quality (RQ) on the validation set using per-image
-ground truth annotations (panoptic_val/<scene_id>/<image_stem>.json).
+Recognition Quality (RQ) on the validation set using the full multi-view
+pipeline with query propagation — matching training exactly.
 
-This script uses the official `panopticapi.evaluation.pq_compute` function
-(the same one used internally by Detectron2's COCOPanopticEvaluator) to
-compute PQ/SQ/RQ.  Because the ScanNet++ dataset stores per-image GT
-JSON+PNG files instead of a single merged COCO-format JSON, this script:
+Evaluation strategy:
+1. Discover all scenes from the panoptic_val directory.
+2. For each scene, select N views that have GT annotations (1 reference +
+   N-1 targets), where N = cfg.MODEL.MULTIVIEW.NUM_VIEWS (default 3).
+3. Feed all N views through the MapAnything backbone (cross-view attention).
+4. Run reference view through pixel decoder + Mask2Former decoder with
+   learnable queries.
+5. Propagate refined query_embeddings to target views (query propagation,
+   same as training — no warped attention mask since depth is disabled).
+6. Panoptic post-process all N views independently.
+7. Compare each view's prediction against its GT, compute per-view PQ.
+8. Average per-view PQ within a scene, then macro-average across scenes.
 
-1. Loads the trained model checkpoint.
-2. Iterates over every validation image (one view at a time).
-3. Runs single-view panoptic inference through the trained model.
-4. Saves predicted panoptic PNGs + assembles a COCO-format prediction JSON.
-5. Assembles a COCO-format GT JSON from the per-image GT annotations.
-6. Calls panopticapi.evaluation.pq_compute to compute official metrics.
-7. Reports overall PQ, SQ, RQ as well as things/stuff splits.
+This evaluates the model the way it was trained: multi-view backbone with
+cross-view attention + query propagation from reference to targets.
 
 Usage (single GPU):
     python m2f_evaluate.py \
@@ -42,6 +45,7 @@ import csv
 import contextlib
 import io as _io
 import tempfile
+import random
 from pathlib import Path
 from collections import defaultdict, OrderedDict
 from typing import Dict, List, Tuple, Optional, Any
@@ -66,6 +70,8 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from detectron2.config import get_cfg
 from detectron2.checkpoint import DetectionCheckpointer
 from detectron2.data import MetadataCatalog
+import detectron2.data.detection_utils as d2_utils
+import detectron2.data.transforms as T
 import detectron2.utils.comm as comm
 
 from mask2former import add_maskformer2_config
@@ -75,7 +81,7 @@ from panopticapi.utils import id2rgb, rgb2id
 from panopticapi.evaluation import pq_compute
 
 # Import model & config helpers from training script
-from m2f_train_multiview_working import (
+from m2f_train_multiview import (
     add_multiview_config,
     setup_cfg,
     MultiViewMask2Former,
@@ -114,8 +120,134 @@ VOID_PANOPTIC_ID = 0       # ID 0 treated as void/unlabeled
 
 
 # ============================================================
-# MODEL LOADING
+# MULTI-VIEW INFERENCE (mirrors training forward pass)
 # ============================================================
+
+@torch.no_grad()
+def run_multiview_inference(
+    model: torch.nn.Module,
+    images: List[torch.Tensor],
+    camera_poses: List[torch.Tensor],
+    camera_intrinsics: List[torch.Tensor],
+    ref_view_idx: int,
+    num_classes: int,
+    overlap_threshold: float = 0.8,
+    object_mask_threshold: float = 0.8,
+) -> List[Tuple[np.ndarray, List[Dict]]]:
+    """
+    Run multi-view panoptic inference matching the training pipeline.
+
+    Pipeline (mirrors MultiViewMask2Former.forward):
+      1. Stack all N views into [B=1, N, 3, H, W]
+      2. Backbone: all views processed together (cross-view attention)
+      3. Reference view: pixel_decoder → query_propagation_decoder (learnable queries)
+      4. Target views: pixel_decoder → query_propagation_decoder (propagated queries)
+      5. Panoptic post-process each view independently
+
+    Args:
+        model: Trained MultiViewMask2Former
+        images: List of N tensors, each [3, H, W] (0-255 range, all same H,W)
+        camera_poses: List of N [4,4] camera-to-world tensors
+        camera_intrinsics: List of N [3,3] intrinsic matrices
+        ref_view_idx: Index of reference view (0..N-1)
+        num_classes: Number of semantic classes
+        overlap_threshold: Panoptic post-processing overlap threshold
+        object_mask_threshold: Mask binarisation threshold
+
+    Returns:
+        List of (panoptic_map, segments_info) tuples, one per view.
+        panoptic_map is [H, W] int32; segments_info is list of dicts.
+    """
+    device = next(model.parameters()).device
+    N = len(images)
+    C, H, W = images[0].shape
+
+    # Stack into batch: [1, N, 3, H, W], [1, N, 4, 4], [1, N, 3, 3]
+    images_batch = torch.stack(images, dim=0).unsqueeze(0).to(device)       # [1, N, 3, H, W]
+    poses_batch = torch.stack(camera_poses, dim=0).unsqueeze(0).to(device)  # [1, N, 4, 4]
+    K_batch = torch.stack(camera_intrinsics, dim=0).unsqueeze(0).to(device) # [1, N, 3, 3]
+
+    # ----- Step 1: Backbone (all views, cross-view attention) -----
+    backbone_out = model.backbone(
+        images=images_batch,
+        camera_poses=poses_batch,
+        camera_intrinsics=K_batch,
+        return_all_views=True,
+    )
+    all_view_features = backbone_out["all_view_features"]
+    # all_view_features: {res2: [N, B, C, H', W'], ...}
+
+    # ----- Step 2: Reference view — learnable queries -----
+    ref_features = model._prepare_features_for_view(all_view_features, ref_view_idx)
+    ref_mask_features, ref_multi_scale_features = model._run_pixel_decoder(ref_features)
+
+    ref_outputs = model.query_propagation_decoder(
+        ref_multi_scale_features,
+        ref_mask_features,
+        mask=None,
+        initial_query_feat=None,   # learnable queries (same as training)
+        initial_attn_mask=None,    # no warped mask (same as training)
+    )
+
+    # Extract refined queries for propagation
+    ref_queries = ref_outputs["query_embeddings"]  # [Q, B, D]
+
+    # ----- Step 3: Decode each view -----
+    per_view_outputs = [None] * N
+
+    # Reference view outputs already computed
+    per_view_outputs[ref_view_idx] = ref_outputs
+
+    # Target views: propagate reference queries
+    for v_idx in range(N):
+        if v_idx == ref_view_idx:
+            continue
+        tgt_features = model._prepare_features_for_view(all_view_features, v_idx)
+        tgt_mask_features, tgt_multi_scale_features = model._run_pixel_decoder(tgt_features)
+
+        tgt_outputs = model.query_propagation_decoder(
+            tgt_multi_scale_features,
+            tgt_mask_features,
+            mask=None,
+            initial_query_feat=ref_queries,  # propagated queries (same as training)
+            initial_attn_mask=None,          # no warped mask (same as training)
+        )
+        per_view_outputs[v_idx] = tgt_outputs
+
+    # ----- Step 4: Post-process each view -----
+    results = []
+    raw_outputs = []  # Store raw per-view outputs for cross-view metrics
+    for v_idx in range(N):
+        outputs = per_view_outputs[v_idx]
+        pred_logits = outputs["pred_logits"]  # [B, Q, C+1]
+        pred_masks = outputs["pred_masks"]    # [B, Q, H', W']
+        query_embeddings = outputs.get("query_embeddings", None)  # [Q, B, D]
+
+        # Upsample masks to input resolution
+        pred_masks_up = F.interpolate(
+            pred_masks,
+            size=(H, W),
+            mode="bilinear",
+            align_corners=False,
+        )
+
+        panoptic_map, segments_info = panoptic_postprocessing(
+            pred_logits[0],
+            pred_masks_up[0],
+            num_classes=num_classes,
+            overlap_threshold=overlap_threshold,
+            object_mask_threshold=object_mask_threshold,
+        )
+        results.append((panoptic_map, segments_info))
+
+        # Store raw outputs for cross-view metric computation
+        raw_outputs.append({
+            "pred_logits": pred_logits[0].cpu(),       # [Q, C+1]
+            "pred_masks": pred_masks_up[0].cpu(),      # [Q, H, W]
+            "query_embeddings": query_embeddings[:, 0, :].cpu() if query_embeddings is not None else None,  # [Q, D]
+        })
+
+    return results, raw_outputs
 
 def load_model(cfg, checkpoint_path: str) -> torch.nn.Module:
     """Load trained model from checkpoint."""
@@ -128,107 +260,6 @@ def load_model(cfg, checkpoint_path: str) -> torch.nn.Module:
     logger.info(f"Loaded checkpoint: {checkpoint_path}")
 
     return model
-
-
-# ============================================================
-# SINGLE-VIEW INFERENCE
-# ============================================================
-
-@torch.no_grad()
-def run_single_view_inference(
-    model: torch.nn.Module,
-    image: torch.Tensor,
-    camera_pose: torch.Tensor,
-    camera_intrinsic: torch.Tensor,
-    num_classes: int,
-    overlap_threshold: float = 0.8,
-    object_mask_threshold: float = 0.8,
-) -> Tuple[np.ndarray, List[Dict]]:
-    """
-    Run panoptic inference on a single image.
-
-    The model expects multi-view input, so we wrap a single view into
-    the expected batch format (B=1, N=1).
-
-    Args:
-        model: Trained MultiViewMask2Former
-        image: [3, H, W] float tensor (already normalised to 0-255 range)
-        camera_pose: [4, 4] camera-to-world
-        camera_intrinsic: [3, 3] intrinsic matrix
-        num_classes: number of semantic classes
-        overlap_threshold: panoptic post-processing overlap threshold
-        object_mask_threshold: panoptic post-processing object threshold
-
-    Returns:
-        panoptic_map: [H, W] int32 with panoptic IDs
-        segments_info: list of dicts with id, category_id, isthing, area
-    """
-    device = next(model.parameters()).device
-
-    # Wrap as multi-view batch: B=1, N=1
-    B, N = 1, 1
-    C, H, W = image.shape
-    images = image.unsqueeze(0).unsqueeze(0).to(device)            # [1,1,3,H,W]
-    poses = camera_pose.unsqueeze(0).unsqueeze(0).to(device)       # [1,1,4,4]
-    intrinsics = camera_intrinsic.unsqueeze(0).unsqueeze(0).to(device)  # [1,1,3,3]
-
-    # Build a dummy batch dict that looks like multi_view_collate_fn output
-    batch = {
-        "images": images,
-        "camera_poses": poses,
-        "camera_intrinsics": intrinsics,
-        "scene_ids": ["eval"],
-        "file_names": ["eval"],
-        "instances": [None],
-    }
-
-    # Run the backbone to get features for view 0
-    backbone_out = model.backbone(
-        images=images,
-        camera_poses=poses,
-        camera_intrinsics=intrinsics,
-        return_all_views=True,
-    )
-    all_view_features = backbone_out["all_view_features"]
-
-    # Extract view 0 features
-    view_features = {}
-    for key in ["res2", "res3", "res4", "res5"]:
-        view_features[key] = all_view_features[key][0]  # [B, C, H', W']
-
-    # Run pixel decoder
-    mask_features, multi_scale_features = model._run_pixel_decoder(view_features)
-
-    # Run transformer decoder (no query propagation)
-    outputs = model.query_propagation_decoder(
-        multi_scale_features,
-        mask_features,
-        mask=None,
-        initial_query_feat=None,
-        initial_attn_mask=None,
-    )
-
-    pred_logits = outputs["pred_logits"]  # [B, Q, C+1]
-    pred_masks = outputs["pred_masks"]    # [B, Q, H', W']
-
-    # Upsample masks to original resolution
-    pred_masks = F.interpolate(
-        pred_masks,
-        size=(H, W),
-        mode="bilinear",
-        align_corners=False,
-    )
-
-    # Panoptic post-processing (following Mask2Former)
-    panoptic_map, segments_info = panoptic_postprocessing(
-        pred_logits[0],
-        pred_masks[0],
-        num_classes=num_classes,
-        overlap_threshold=overlap_threshold,
-        object_mask_threshold=object_mask_threshold,
-    )
-
-    return panoptic_map, segments_info
 
 
 def panoptic_postprocessing(
@@ -321,6 +352,275 @@ def panoptic_postprocessing(
 
 
 # ============================================================
+# CROSS-VIEW CONSISTENCY METRICS
+# ============================================================
+
+def compute_per_view_pq(
+    per_view_results: List[Tuple[np.ndarray, List[Dict]]],
+    view_gt_maps: List[np.ndarray],
+    view_gt_segments: List[List[Dict]],
+    selected_stems: List[str],
+    output_dir: str,
+    scene_id: str,
+) -> Dict[str, Any]:
+    """
+    Compute PQ for each view independently and return per-view breakdown.
+
+    Returns:
+        Dict with per_view_pq (list), avg_pq, pq_variance, pq_std
+    """
+    num_views = len(per_view_results)
+    per_view_pq = []
+
+    for v_idx in range(num_views):
+        stem = selected_stems[v_idx]
+        pred_panoptic, pred_segments = per_view_results[v_idx]
+        gt_panoptic_map = view_gt_maps[v_idx]
+        gt_segments = view_gt_segments[v_idx]
+
+        # Resize prediction to match GT resolution
+        gt_h, gt_w = gt_panoptic_map.shape
+        if pred_panoptic.shape != gt_panoptic_map.shape:
+            pred_panoptic = cv2.resize(
+                pred_panoptic.astype(np.float32),
+                (gt_w, gt_h),
+                interpolation=cv2.INTER_NEAREST,
+            ).astype(np.int32)
+
+        # Build per-view temporary files for panopticapi evaluation
+        view_out = os.path.join(output_dir, "per_view_tmp", scene_id, f"view_{v_idx}")
+        os.makedirs(os.path.join(view_out, "gt"), exist_ok=True)
+        os.makedirs(os.path.join(view_out, "pred"), exist_ok=True)
+
+        file_name = f"{stem}.png"
+
+        # Collect categories
+        cat_ids = set()
+        isthing_map = {}
+        for seg in gt_segments:
+            cid = int(seg["category_id"])
+            cat_ids.add(cid)
+            isthing_map[cid] = int(seg.get("isthing", 0))
+        for seg in pred_segments:
+            cat_ids.add(int(seg["category_id"]))
+
+        categories = []
+        for cid in sorted(cat_ids):
+            categories.append({
+                "id": cid,
+                "name": str(cid),
+                "isthing": isthing_map.get(cid, 0),
+            })
+
+        if not categories:
+            per_view_pq.append(0.0)
+            continue
+
+        # Save GT PNG
+        gt_png_out = re_encode_panoptic_png(gt_panoptic_map)
+        gt_png_out.save(os.path.join(view_out, "gt", file_name))
+
+        gt_ann_segments = []
+        for seg in gt_segments:
+            gt_ann_segments.append({
+                "id": int(seg["id"]),
+                "category_id": int(seg["category_id"]),
+                "iscrowd": int(seg.get("iscrowd", 0)),
+                "area": int((gt_panoptic_map == seg["id"]).sum()),
+            })
+
+        # Save Pred PNG
+        pred_png_out = re_encode_panoptic_png(pred_panoptic)
+        pred_png_out.save(os.path.join(view_out, "pred", file_name))
+
+        pred_ann_segments = []
+        for seg in pred_segments:
+            pred_ann_segments.append({
+                "id": int(seg["id"]),
+                "category_id": int(seg["category_id"]),
+                "area": int((pred_panoptic == seg["id"]).sum()),
+            })
+
+        images_meta = [{"id": 1, "file_name": stem}]
+
+        gt_json_data = {
+            "images": images_meta,
+            "annotations": [{
+                "image_id": 1,
+                "file_name": file_name,
+                "segments_info": gt_ann_segments,
+            }],
+            "categories": categories,
+        }
+        gt_json_path = os.path.join(view_out, "gt_panoptic.json")
+        with open(gt_json_path, "w") as f:
+            json.dump(gt_json_data, f)
+
+        pred_json_data = {
+            "images": images_meta,
+            "annotations": [{
+                "image_id": 1,
+                "file_name": file_name,
+                "segments_info": pred_ann_segments,
+            }],
+            "categories": categories,
+        }
+        pred_json_path = os.path.join(view_out, "pred_panoptic.json")
+        with open(pred_json_path, "w") as f:
+            json.dump(pred_json_data, f)
+
+        try:
+            pq_res = pq_compute(
+                gt_json_path,
+                pred_json_path,
+                gt_folder=os.path.join(view_out, "gt"),
+                pred_folder=os.path.join(view_out, "pred"),
+            )
+            all_res = pq_res.get("All", {})
+            n = all_res.get("n", 0)
+            pq_val = 100.0 * all_res.get("pq", 0.0) if n > 0 else 0.0
+        except Exception:
+            pq_val = 0.0
+
+        per_view_pq.append(pq_val)
+
+        # Clean up temporary files
+        import shutil
+        shutil.rmtree(view_out, ignore_errors=True)
+
+    avg_pq = float(np.mean(per_view_pq)) if per_view_pq else 0.0
+    pq_var = float(np.var(per_view_pq)) if len(per_view_pq) > 1 else 0.0
+    pq_std = float(np.std(per_view_pq)) if len(per_view_pq) > 1 else 0.0
+
+    return {
+        "per_view_pq": per_view_pq,
+        "avg_pq": avg_pq,
+        "pq_variance": pq_var,
+        "pq_std": pq_std,
+    }
+
+
+def compute_cross_view_metrics(
+    raw_outputs: List[Dict[str, torch.Tensor]],
+    num_classes: int,
+) -> Dict[str, float]:
+    """
+    Compute cross-view consistency metrics using raw per-view outputs.
+
+    All metrics compare the SAME query index across different views.
+    Since query propagation re-uses reference queries for target views,
+    Query #k should represent the same entity in all views.
+
+    Metrics:
+        1. Class Consistency: Fraction of queries that predict the same
+           class in all views (higher = more consistent).
+        2. Mask IoU: Average IoU of the same query's binarised mask
+           across all view pairs (higher = more spatial overlap).
+        3. Query Feature Similarity: Average cosine similarity of
+           query embedding vectors across all view pairs.
+
+    Args:
+        raw_outputs: List of per-view dicts, each with:
+            - pred_logits: [Q, C+1] class logits
+            - pred_masks:  [Q, H, W] mask logits (pre-sigmoid)
+            - query_embeddings: [Q, D] query feature vectors (or None)
+        num_classes: Number of valid classes (excluding no-object)
+
+    Returns:
+        Dict with class_consistency, mask_iou, query_cosine_similarity
+    """
+    N = len(raw_outputs)
+    if N < 2:
+        return {
+            "class_consistency": 1.0,
+            "mask_iou": 1.0,
+            "query_cosine_similarity": 1.0,
+        }
+
+    Q = raw_outputs[0]["pred_logits"].shape[0]
+
+    # ------------------------------------------------------------------
+    # 1. Per-view predicted classes: [N, Q]
+    # ------------------------------------------------------------------
+    per_view_classes = []
+    for out in raw_outputs:
+        scores = F.softmax(out["pred_logits"], dim=-1)  # [Q, C+1]
+        scores = scores[:, :num_classes]                 # [Q, C]
+        _, labels = scores.max(dim=-1)                   # [Q]
+        per_view_classes.append(labels)
+    classes_stack = torch.stack(per_view_classes, dim=0)  # [N, Q]
+
+    # Class consistency: fraction of queries where ALL views agree
+    # For each query, check if the mode class == all predictions
+    ref_classes = classes_stack[0]  # reference view classes
+    agreement_mask = torch.ones(Q, dtype=torch.bool)
+    for v in range(1, N):
+        agreement_mask &= (classes_stack[v] == ref_classes)
+    class_consistency = float(agreement_mask.float().mean().item())
+
+    # ------------------------------------------------------------------
+    # 2. Mask IoU across view pairs
+    # ------------------------------------------------------------------
+    # Binarise masks at 0.5 threshold (same as post-processing)
+    per_view_binary_masks = []
+    for out in raw_outputs:
+        binary = (out["pred_masks"].sigmoid() > 0.5)  # [Q, H, W]
+        per_view_binary_masks.append(binary)
+
+    pair_ious = []
+    for i in range(N):
+        for j in range(i + 1, N):
+            mask_i = per_view_binary_masks[i].float()  # [Q, H, W]
+            mask_j = per_view_binary_masks[j].float()  # [Q, H, W]
+
+            intersection = (mask_i * mask_j).sum(dim=(1, 2))  # [Q]
+            union = ((mask_i + mask_j) > 0).float().sum(dim=(1, 2))  # [Q]
+
+            # Avoid division by zero (empty masks)
+            valid = union > 0
+            if valid.sum() > 0:
+                iou = torch.zeros(Q)
+                iou[valid] = intersection[valid] / union[valid]
+                pair_ious.append(iou.mean().item())
+            else:
+                pair_ious.append(0.0)
+
+    mask_iou = float(np.mean(pair_ious)) if pair_ious else 0.0
+
+    # ------------------------------------------------------------------
+    # 3. Query feature cosine similarity across view pairs
+    # ------------------------------------------------------------------
+    has_embeddings = all(
+        out.get("query_embeddings") is not None for out in raw_outputs
+    )
+
+    if has_embeddings:
+        per_view_embeds = []
+        for out in raw_outputs:
+            emb = out["query_embeddings"]  # [Q, D]
+            # L2 normalise for cosine similarity
+            emb_norm = F.normalize(emb, p=2, dim=-1)
+            per_view_embeds.append(emb_norm)
+
+        pair_cosines = []
+        for i in range(N):
+            for j in range(i + 1, N):
+                # Cosine similarity per query: dot product of normalised vectors
+                cos_sim = (per_view_embeds[i] * per_view_embeds[j]).sum(dim=-1)  # [Q]
+                pair_cosines.append(cos_sim.mean().item())
+
+        query_cosine_similarity = float(np.mean(pair_cosines)) if pair_cosines else 0.0
+    else:
+        query_cosine_similarity = float("nan")
+
+    return {
+        "class_consistency": class_consistency,
+        "mask_iou": mask_iou,
+        "query_cosine_similarity": query_cosine_similarity,
+    }
+
+
+# ============================================================
 # GROUND TRUTH LOADING
 # ============================================================
 
@@ -383,34 +683,40 @@ def load_and_prepare_image(
     """
     Load an image, resize, and return as a float tensor.
 
+    Uses the same pipeline as training:
+      - detectron2 read_image (handles EXIF rotation, returns HWC uint8)
+      - detectron2 ResizeShortestEdge (same rounding as training)
+      - Pad to be divisible by 32 (value=128, same as training)
+      - torch.as_tensor → float  (training uses int, but backbone casts)
+
     Returns:
         image: [3, H, W] float32 tensor (0-255 range, RGB)
         original_size: (orig_H, orig_W)
     """
-    img = cv2.imread(image_path)
-    if img is None:
-        raise FileNotFoundError(f"Cannot read image: {image_path}")
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    # Read image (same as training: utils.read_image with RGB format)
+    img = d2_utils.read_image(image_path, format="RGB")  # HWC uint8 np
     orig_h, orig_w = img.shape[:2]
 
-    # Resize shortest edge
-    scale = target_short_edge / min(orig_h, orig_w)
-    if max(orig_h, orig_w) * scale > max_size:
-        scale = max_size / max(orig_h, orig_w)
+    # Resize using detectron2 transform (same as training dataset mapper)
+    resize_tfm = T.ResizeShortestEdge(target_short_edge, max_size)
+    transform = resize_tfm.get_transform(img)
+    img = transform.apply_image(img)
 
-    new_h = int(round(orig_h * scale))
-    new_w = int(round(orig_w * scale))
-    img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    new_h, new_w = img.shape[:2]
 
-    # Pad to be divisible by 32
+    # Pad to be divisible by 32 (same as training, value=128)
     pad_h = (32 - new_h % 32) % 32
     pad_w = (32 - new_w % 32) % 32
     if pad_h > 0 or pad_w > 0:
         img = np.pad(img, ((0, pad_h), (0, pad_w), (0, 0)),
                      mode="constant", constant_values=128)
 
-    # To tensor [3, H, W] float32
-    img_tensor = torch.from_numpy(img.transpose(2, 0, 1)).float()
+    # To tensor [3, H, W] float32 (training uses torch.as_tensor which
+    # preserves uint8, but backbone internally casts to float; using
+    # .float() here is equivalent and matches m2f_inference.py)
+    img_tensor = torch.from_numpy(
+        np.ascontiguousarray(img.transpose(2, 0, 1))
+    ).float()
 
     return img_tensor, (orig_h, orig_w)
 
@@ -450,93 +756,110 @@ def evaluate(
     val_split_file: str,
     output_dir: str,
     num_classes: int = 254,
+    num_views: int = 3,
     target_short_edge: int = 480,
     max_size: int = 640,
     overlap_threshold: float = 0.8,
     object_mask_threshold: float = 0.8,
     max_images_per_scene: Optional[int] = None,
     save_predictions: bool = False,
+    seed: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
-    Run evaluation over the entire validation set using panopticapi.
+    Run multi-view per-scene evaluation over all scenes in panoptic_val.
 
-    For each image:
-      1. Run inference to get a predicted panoptic map + segments_info.
-      2. Load the per-image GT panoptic PNG + JSON.
-      3. Re-encode both GT and pred panoptic maps into panopticapi-compatible
-         RGB PNGs (using id2rgb) so that pq_compute can decode them with rgb2id.
-      4. Accumulate COCO-format annotation entries for GT and pred.
+    For each scene:
+      1. Select N views that have GT annotations (1 ref + N-1 targets).
+      2. Feed all N views through the backbone (cross-view attention).
+      3. Run reference view with learnable queries, propagate to targets.
+      4. Panoptic post-process all N views.
+      5. Compute PQ for each view against its GT, average within scene.
 
-    After all images are processed, call panopticapi.evaluation.pq_compute
-    with the assembled GT JSON, prediction JSON, and the PNG folders.
+    After all scenes, macro-average the per-scene metrics.
+
+    This matches the training forward pass: multi-view backbone →
+    query propagation from reference to targets.
 
     Args:
-        model: Trained model (already on GPU)
+        model: Trained MultiViewMask2Former (already on GPU)
         scannetpp_root: Path to ScanNet++ data root
         panoptic_val_root: Path to panoptic_val directory with GT JSONs + PNGs
-        val_split_file: Path to validation split file
+        val_split_file: Unused (scenes discovered from panoptic_val directory)
         output_dir: Directory for output CSVs / predictions
         num_classes: Number of semantic classes
+        num_views: Number of views per scene (1 ref + N-1 targets)
         target_short_edge: Resize short edge for inference
         max_size: Maximum image dimension
         overlap_threshold: Panoptic post-processing overlap threshold
         object_mask_threshold: Mask binarisation threshold
-        max_images_per_scene: Limit images per scene (None = all)
+        max_images_per_scene: Unused (kept for API compatibility)
         save_predictions: Save predicted panoptic PNGs to output dir
+        seed: Random seed for view selection (None = random)
 
     Returns:
-        Dict with PQ, SQ, RQ metrics
+        Dict with averaged PQ, SQ, RQ metrics and per-scene breakdown
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    # Read validation scenes
-    with open(val_split_file, "r") as f:
-        val_scenes = [line.strip() for line in f if line.strip()]
+    # ---------------------------------------------------------------
+    # Discover all scenes from panoptic_val directory
+    # ---------------------------------------------------------------
+    panoptic_val_path = Path(panoptic_val_root)
+    val_scenes = sorted([
+        d.name for d in panoptic_val_path.iterdir()
+        if d.is_dir()
+    ])
 
-    logger.info(f"Evaluating on {len(val_scenes)} validation scenes")
-    logger.info(f"GT panoptic root: {panoptic_val_root}")
+    logger.info(f"Discovered {len(val_scenes)} validation scenes in {panoptic_val_root}")
+    logger.info(f"Multi-view evaluation: {num_views} views per scene (1 ref + {num_views - 1} targets)")
     logger.info(f"Image short edge: {target_short_edge}, max size: {max_size}")
 
     model.eval()
     device = next(model.parameters()).device
 
-    # Try to get metadata for thing/stuff class info
-    metadata = None
-    try:
-        metadata = MetadataCatalog.get("scannetpp_panoptic_val")
-    except Exception:
-        try:
-            metadata = MetadataCatalog.get("scannetpp_panoptic_train")
-        except Exception:
-            pass
+    # Per-scene results accumulator
+    per_scene_results = {}
+    scenes_evaluated = 0
+    scenes_skipped = 0
 
-    categories = build_categories_list(num_classes, metadata)
-    categories_dict = {c["id"]: c for c in categories}
+    # RNG for reproducible view selection
+    rng = np.random.default_rng(seed)
 
-    # Temp directories for panopticapi-compatible PNGs
-    gt_png_dir = os.path.join(output_dir, "gt_panoptic_pngs")
-    pred_png_dir = os.path.join(output_dir, "pred_panoptic_pngs")
-    os.makedirs(gt_png_dir, exist_ok=True)
-    os.makedirs(pred_png_dir, exist_ok=True)
-
-    # COCO-format annotation lists
-    gt_annotations = []
-    pred_annotations = []
-    images_list = []
-
-    total_images = 0
-    skipped_images = 0
-    image_id_counter = 0
-
-    for scene_id in tqdm(val_scenes, desc="Scenes"):
-        scene = ScanNetPPScene(scene_id, scannetpp_root)
-        scene_panoptic_dir = Path(panoptic_val_root) / scene_id
+    for scene_idx, scene_id in enumerate(tqdm(val_scenes, desc="Scenes")):
+        scene_panoptic_dir = panoptic_val_path / scene_id
 
         if not scene_panoptic_dir.exists():
             logger.warning(f"No panoptic GT for scene {scene_id}, skipping")
+            scenes_skipped += 1
             continue
 
-        # Load camera data — try NerfStudio transforms first, COLMAP as fallback
+        # ---------------------------------------------------------------
+        # 1. Find all GT views with both JSON and PNG
+        # ---------------------------------------------------------------
+        gt_json_files = sorted(scene_panoptic_dir.glob("*.json"))
+        if not gt_json_files:
+            logger.warning(f"No GT annotations for scene {scene_id}, skipping")
+            scenes_skipped += 1
+            continue
+
+        # Filter to views that have both JSON and PNG
+        available_stems = []
+        for jf in gt_json_files:
+            if (scene_panoptic_dir / f"{jf.stem}.png").exists():
+                available_stems.append(jf.stem)
+
+        if len(available_stems) < num_views:
+            logger.warning(
+                f"Scene {scene_id}: only {len(available_stems)} GT views, "
+                f"need {num_views}, skipping"
+            )
+            scenes_skipped += 1
+            continue
+
+        # ---------------------------------------------------------------
+        # 2. Load camera data for this scene
+        # ---------------------------------------------------------------
+        scene = ScanNetPPScene(scene_id, scannetpp_root)
         intrinsics = None
         frames = []
 
@@ -547,7 +870,6 @@ def evaluate(
         if transforms_path.exists():
             intrinsics, frames = read_nerfstudio_transforms(str(transforms_path))
         else:
-            # COLMAP fallback (same as ScanNetPPMultiViewDatasetMapper._load_scene_data)
             colmap_dir = scene.dslr_colmap_dir
             cameras_file = colmap_dir / 'cameras.txt'
             images_file = colmap_dir / 'images.txt'
@@ -573,7 +895,6 @@ def evaluate(
                         intrinsics['k3'] = cam['params'][6]
                         intrinsics['k4'] = cam['params'][7]
 
-                # Get image directory for constructing frame file paths
                 image_dir_for_colmap = scene.dslr_undistorted_dir
                 if not image_dir_for_colmap.exists():
                     image_dir_for_colmap = scene.dslr_resized_dir
@@ -585,23 +906,20 @@ def evaluate(
                         'camera_to_world': data['camera_to_world'],
                         'is_bad': False,
                     })
-                logger.info(f"  Scene {scene_id}: loaded {len(frames)} frames from COLMAP")
             else:
-                logger.warning(
-                    f"No transforms for scene {scene_id}: "
-                    f"no NerfStudio at {transforms_path}, "
-                    f"no COLMAP at {colmap_dir}"
-                )
+                logger.warning(f"No transforms for scene {scene_id}, skipping")
+                scenes_skipped += 1
                 continue
 
-        if not frames:
-            logger.warning(f"No frames for scene {scene_id}, skipping")
+        if not frames or intrinsics is None:
+            logger.warning(f"No frames/intrinsics for scene {scene_id}, skipping")
+            scenes_skipped += 1
             continue
 
         K = build_intrinsic_matrix(intrinsics)
         K_tensor = torch.from_numpy(K).float()
 
-        # Build frame lookup
+        # Build frame lookup by stem
         frame_lookup = {Path(f["file_path"]).stem: f for f in frames}
 
         # Get image directory
@@ -609,81 +927,163 @@ def evaluate(
         if not image_dir.exists():
             image_dir = scene.dslr_resized_dir
 
-        # List GT annotation files
-        gt_json_files = sorted(scene_panoptic_dir.glob("*.json"))
-        if max_images_per_scene is not None:
-            gt_json_files = gt_json_files[:max_images_per_scene]
-
-        for json_path in gt_json_files:
-            image_stem = json_path.stem  # e.g. "DSC00001"
-
-            # Find the corresponding GT PNG
-            gt_png_path = scene_panoptic_dir / f"{image_stem}.png"
-            if not gt_png_path.exists():
-                skipped_images += 1
-                continue
-
-            # Find image file
-            image_path = None
-            for ext in [".JPG", ".jpg", ".png"]:
-                candidate = image_dir / f"{image_stem}{ext}"
-                if candidate.exists():
-                    image_path = str(candidate)
-                    break
-
-            if image_path is None:
-                skipped_images += 1
-                continue
-
-            # Get camera pose
-            frame_info = frame_lookup.get(image_stem)
-            if frame_info is None:
+        # ---------------------------------------------------------------
+        # 3. Select N views that have GT + camera pose + image file
+        # ---------------------------------------------------------------
+        # Filter available_stems to those with camera data and images
+        valid_stems = []
+        for stem in available_stems:
+            # Check camera pose exists
+            fi = frame_lookup.get(stem)
+            if fi is None:
+                # Try partial match
                 for key in frame_lookup:
-                    if key.startswith(image_stem):
-                        frame_info = frame_lookup[key]
+                    if key.startswith(stem):
+                        fi = frame_lookup[key]
+                        break
+            if fi is None:
+                continue
+            # Check image file exists
+            found_img = False
+            for ext in [".JPG", ".jpg", ".png"]:
+                if (image_dir / f"{stem}{ext}").exists():
+                    found_img = True
+                    break
+            if found_img:
+                valid_stems.append(stem)
+
+        if len(valid_stems) < num_views:
+            logger.warning(
+                f"Scene {scene_id}: only {len(valid_stems)} valid views "
+                f"(with GT + pose + image), need {num_views}, skipping"
+            )
+            scenes_skipped += 1
+            continue
+
+        # Randomly select N views; view 0 = reference
+        selected_indices = rng.choice(len(valid_stems), size=num_views, replace=False)
+        selected_stems = [valid_stems[i] for i in sorted(selected_indices)]
+        ref_view_idx = 0  # First selected view is reference
+
+        # ---------------------------------------------------------------
+        # 4. Load images, poses, intrinsics for selected views
+        # ---------------------------------------------------------------
+        view_images = []
+        view_poses = []
+        view_K_scaled = []
+        view_gt_maps = []
+        view_gt_segments = []
+
+        try:
+            # We need all images at the same spatial resolution for batching.
+            # Load + resize each view identically.
+            for stem in selected_stems:
+                # --- Image ---
+                image_path = None
+                for ext in [".JPG", ".jpg", ".png"]:
+                    candidate = image_dir / f"{stem}{ext}"
+                    if candidate.exists():
+                        image_path = str(candidate)
                         break
 
-            if frame_info is None:
-                skipped_images += 1
-                continue
-
-            c2w = frame_info["camera_to_world"]
-            if isinstance(c2w, np.ndarray):
-                c2w = torch.from_numpy(c2w).float()
-            else:
-                c2w = torch.tensor(c2w).float()
-
-            try:
-                # ------- Load and decode GT -------
-                gt_panoptic_map, gt_segments = load_gt_panoptic(
-                    str(gt_png_path), str(json_path)
-                )
-
-                # ------- Run inference -------
                 img_tensor, orig_size = load_and_prepare_image(
                     image_path, target_short_edge, max_size
                 )
 
-                # Scale intrinsics for the resized image
+                # --- Camera pose ---
+                fi = frame_lookup.get(stem)
+                if fi is None:
+                    for key in frame_lookup:
+                        if key.startswith(stem):
+                            fi = frame_lookup[key]
+                            break
+
+                c2w = fi.get("camera_to_world")
+                if c2w is None:
+                    if "transform_matrix" in fi:
+                        c2w_opengl = np.array(fi["transform_matrix"], dtype=np.float32)
+                        convert_mat = np.diag([1, -1, -1, 1]).astype(np.float32)
+                        c2w = c2w_opengl @ convert_mat
+                if isinstance(c2w, np.ndarray):
+                    c2w = torch.from_numpy(c2w).float()
+                else:
+                    c2w = torch.tensor(c2w).float()
+
+                # --- Scale intrinsics ---
                 orig_h, orig_w = orig_size
                 _, resized_h, resized_w = img_tensor.shape
                 scale_x = resized_w / orig_w
                 scale_y = resized_h / orig_h
-                K_scaled = K_tensor.clone()
-                K_scaled[0, 0] *= scale_x
-                K_scaled[1, 1] *= scale_y
-                K_scaled[0, 2] *= scale_x
-                K_scaled[1, 2] *= scale_y
+                Ks = K_tensor.clone()
+                Ks[0, 0] *= scale_x
+                Ks[1, 1] *= scale_y
+                Ks[0, 2] *= scale_x
+                Ks[1, 2] *= scale_y
 
-                pred_panoptic, pred_segments = run_single_view_inference(
-                    model=model,
-                    image=img_tensor,
-                    camera_pose=c2w,
-                    camera_intrinsic=K_scaled,
-                    num_classes=num_classes,
-                    overlap_threshold=overlap_threshold,
-                    object_mask_threshold=object_mask_threshold,
+                # --- GT ---
+                gt_png_path = scene_panoptic_dir / f"{stem}.png"
+                gt_json_path = scene_panoptic_dir / f"{stem}.json"
+                gt_panoptic_map, gt_segments = load_gt_panoptic(
+                    str(gt_png_path), str(gt_json_path)
                 )
+
+                view_images.append(img_tensor)
+                view_poses.append(c2w)
+                view_K_scaled.append(Ks)
+                view_gt_maps.append(gt_panoptic_map)
+                view_gt_segments.append(gt_segments)
+
+            # All images must be the same H, W for batching.
+            # They should be (same scene, same camera, same resize params),
+            # but enforce by checking and padding to largest if needed.
+            shapes = [img.shape for img in view_images]
+            max_h = max(s[1] for s in shapes)
+            max_w = max(s[2] for s in shapes)
+            for i in range(len(view_images)):
+                c, h, w = view_images[i].shape
+                if h < max_h or w < max_w:
+                    padded = torch.full((c, max_h, max_w), 128.0)
+                    padded[:, :h, :w] = view_images[i]
+                    view_images[i] = padded
+
+            # ---------------------------------------------------------------
+            # 5. Run multi-view inference
+            # ---------------------------------------------------------------
+            per_view_results, raw_outputs = run_multiview_inference(
+                model=model,
+                images=view_images,
+                camera_poses=view_poses,
+                camera_intrinsics=view_K_scaled,
+                ref_view_idx=ref_view_idx,
+                num_classes=num_classes,
+                overlap_threshold=overlap_threshold,
+                object_mask_threshold=object_mask_threshold,
+            )
+
+            # ---------------------------------------------------------------
+            # 6. Evaluate each view against its GT
+            # ---------------------------------------------------------------
+            scene_output_dir = os.path.join(output_dir, "per_scene", scene_id)
+            os.makedirs(scene_output_dir, exist_ok=True)
+
+            gt_png_dir = os.path.join(scene_output_dir, "gt_pngs")
+            pred_png_dir = os.path.join(scene_output_dir, "pred_pngs")
+            os.makedirs(gt_png_dir, exist_ok=True)
+            os.makedirs(pred_png_dir, exist_ok=True)
+
+            all_gt_annotations = []
+            all_pred_annotations = []
+            all_images_meta = []
+
+            # Collect categories from all views in this scene
+            scene_cat_ids = set()
+            gt_isthing = {}
+
+            for v_idx in range(num_views):
+                stem = selected_stems[v_idx]
+                pred_panoptic, pred_segments = per_view_results[v_idx]
+                gt_panoptic_map = view_gt_maps[v_idx]
+                gt_segments = view_gt_segments[v_idx]
 
                 # Resize prediction to match GT resolution
                 gt_h, gt_w = gt_panoptic_map.shape
@@ -694,190 +1094,330 @@ def evaluate(
                         interpolation=cv2.INTER_NEAREST,
                     ).astype(np.int32)
 
-                # ------- Save GT PNG (re-encoded for panopticapi) -------
-                image_id_counter += 1
-                img_id = image_id_counter
-                gt_file_name = f"{scene_id}_{image_stem}.png"
-                gt_png_out = re_encode_panoptic_png(gt_panoptic_map)
-                gt_png_out.save(os.path.join(gt_png_dir, gt_file_name))
+                # Collect categories
+                for seg in gt_segments:
+                    cid = int(seg["category_id"])
+                    scene_cat_ids.add(cid)
+                    if cid not in gt_isthing:
+                        gt_isthing[cid] = int(seg.get("isthing", 0))
+                for seg in pred_segments:
+                    scene_cat_ids.add(int(seg["category_id"]))
 
-                # Ensure each GT segment has required fields for panopticapi
+                img_id = v_idx + 1
+                file_name = f"{stem}.png"
+
+                # Save GT PNG
+                gt_png_out = re_encode_panoptic_png(gt_panoptic_map)
+                gt_png_out.save(os.path.join(gt_png_dir, file_name))
+
                 gt_ann_segments = []
                 for seg in gt_segments:
-                    seg_entry = {
+                    gt_ann_segments.append({
                         "id": int(seg["id"]),
                         "category_id": int(seg["category_id"]),
                         "iscrowd": int(seg.get("iscrowd", 0)),
-                    }
-                    # Compute area from the actual map
-                    seg_entry["area"] = int((gt_panoptic_map == seg["id"]).sum())
-                    gt_ann_segments.append(seg_entry)
+                        "area": int((gt_panoptic_map == seg["id"]).sum()),
+                    })
 
-                gt_annotations.append({
-                    "image_id": img_id,
-                    "file_name": gt_file_name,
-                    "segments_info": gt_ann_segments,
-                })
-
-                # ------- Save pred PNG (encoded for panopticapi) -------
-                pred_file_name = f"{scene_id}_{image_stem}.png"
+                # Save Pred PNG
                 pred_png_out = re_encode_panoptic_png(pred_panoptic)
-                pred_png_out.save(os.path.join(pred_png_dir, pred_file_name))
+                pred_png_out.save(os.path.join(pred_png_dir, file_name))
 
-                # Determine isthing for predicted segments using categories
                 pred_ann_segments = []
                 for seg in pred_segments:
-                    cat_id = int(seg["category_id"])
-                    seg_entry = {
+                    pred_ann_segments.append({
                         "id": int(seg["id"]),
-                        "category_id": cat_id,
-                    }
-                    # Compute area from the actual map
-                    seg_entry["area"] = int((pred_panoptic == seg["id"]).sum())
-                    pred_ann_segments.append(seg_entry)
+                        "category_id": int(seg["category_id"]),
+                        "area": int((pred_panoptic == seg["id"]).sum()),
+                    })
 
-                pred_annotations.append({
+                all_images_meta.append({"id": img_id, "file_name": stem})
+                all_gt_annotations.append({
                     "image_id": img_id,
-                    "file_name": pred_file_name,
+                    "file_name": file_name,
+                    "segments_info": gt_ann_segments,
+                })
+                all_pred_annotations.append({
+                    "image_id": img_id,
+                    "file_name": file_name,
                     "segments_info": pred_ann_segments,
                 })
 
-                images_list.append({
-                    "id": img_id,
-                    "file_name": f"{scene_id}_{image_stem}",
+            # Build scene-specific categories
+            scene_categories = []
+            for cid in sorted(scene_cat_ids):
+                scene_categories.append({
+                    "id": cid,
+                    "name": str(cid),
+                    "isthing": gt_isthing.get(cid, 0),
                 })
 
-                total_images += 1
-
-                if total_images % 50 == 0:
-                    logger.info(f"  Processed {total_images} images...")
-
-            except Exception as e:
-                logger.warning(f"Error processing {scene_id}/{image_stem}: {e}")
-                import traceback
-                traceback.print_exc()
-                skipped_images += 1
+            if not scene_categories:
+                logger.warning(f"No categories in GT/pred for scene {scene_id}, skipping")
+                scenes_skipped += 1
                 continue
 
-    logger.info(f"Inference complete: {total_images} images, {skipped_images} skipped")
+            # Build COCO-format JSONs for all views in this scene
+            gt_json_data = {
+                "images": all_images_meta,
+                "annotations": all_gt_annotations,
+                "categories": scene_categories,
+            }
+            gt_json_out = os.path.join(scene_output_dir, "gt_panoptic.json")
+            with open(gt_json_out, "w") as f:
+                json.dump(gt_json_data, f)
 
-    if total_images == 0:
-        logger.error("No images were successfully processed!")
+            pred_json_data = {
+                "images": all_images_meta,
+                "annotations": all_pred_annotations,
+                "categories": scene_categories,
+            }
+            pred_json_out = os.path.join(scene_output_dir, "pred_panoptic.json")
+            with open(pred_json_out, "w") as f:
+                json.dump(pred_json_data, f)
+
+            # Run panopticapi evaluation for this scene (across all N views)
+            pq_res = pq_compute(
+                gt_json_out,
+                pred_json_out,
+                gt_folder=gt_png_dir,
+                pred_folder=pred_png_dir,
+            )
+
+            # Extract metrics, handling zero-category cases gracefully
+            def _safe_get(d, key):
+                val = d.get(key, {})
+                n = val.get("n", 0)
+                if n == 0:
+                    return {"pq": 0.0, "sq": 0.0, "rq": 0.0, "n": 0}
+                return val
+
+            all_res = _safe_get(pq_res, "All")
+            things_res = _safe_get(pq_res, "Things")
+            stuff_res = _safe_get(pq_res, "Stuff")
+
+            # ---------------------------------------------------------------
+            # 6b. Compute per-view PQ breakdown
+            # ---------------------------------------------------------------
+            per_view_pq_metrics = compute_per_view_pq(
+                per_view_results=per_view_results,
+                view_gt_maps=view_gt_maps,
+                view_gt_segments=view_gt_segments,
+                selected_stems=selected_stems,
+                output_dir=output_dir,
+                scene_id=scene_id,
+            )
+
+            # ---------------------------------------------------------------
+            # 6c. Compute cross-view consistency metrics
+            # ---------------------------------------------------------------
+            cross_view_metrics = compute_cross_view_metrics(
+                raw_outputs=raw_outputs,
+                num_classes=num_classes,
+            )
+
+            scene_metrics = {
+                "PQ": 100 * all_res["pq"],
+                "SQ": 100 * all_res["sq"],
+                "RQ": 100 * all_res["rq"],
+                "PQ_th": 100 * things_res["pq"],
+                "SQ_th": 100 * things_res["sq"],
+                "RQ_th": 100 * things_res["rq"],
+                "PQ_st": 100 * stuff_res["pq"],
+                "SQ_st": 100 * stuff_res["sq"],
+                "RQ_st": 100 * stuff_res["rq"],
+                "n_classes_all": all_res["n"],
+                "n_classes_things": things_res["n"],
+                "n_classes_stuff": stuff_res["n"],
+                "num_views": num_views,
+                "reference_view": selected_stems[ref_view_idx],
+                "target_views": [s for i, s in enumerate(selected_stems) if i != ref_view_idx],
+                # Per-view PQ breakdown
+                "per_view_pq": per_view_pq_metrics["per_view_pq"],
+                "avg_per_view_pq": per_view_pq_metrics["avg_pq"],
+                "pq_variance": per_view_pq_metrics["pq_variance"],
+                "pq_std": per_view_pq_metrics["pq_std"],
+                # Cross-view consistency metrics
+                "class_consistency": cross_view_metrics["class_consistency"],
+                "mask_iou": cross_view_metrics["mask_iou"],
+                "query_cosine_similarity": cross_view_metrics["query_cosine_similarity"],
+            }
+
+            per_scene_results[scene_id] = scene_metrics
+            scenes_evaluated += 1
+
+            logger.info(
+                f"  Scene {scene_id} ({num_views}v, ref={selected_stems[ref_view_idx]}): "
+                f"PQ={scene_metrics['PQ']:.2f}  "
+                f"SQ={scene_metrics['SQ']:.2f}  "
+                f"RQ={scene_metrics['RQ']:.2f}  |"
+                f"  Per-View PQ: {[f'{p:.1f}' for p in scene_metrics['per_view_pq']]}  "
+                f"Var={scene_metrics['pq_variance']:.2f}  |"
+                f"  ClassCons={scene_metrics['class_consistency']:.3f}  "
+                f"MaskIoU={scene_metrics['mask_iou']:.3f}  "
+                f"QuerCos={scene_metrics['query_cosine_similarity']:.3f}"
+            )
+
+            # Clean up per-scene temp PNGs unless user wants them
+            if not save_predictions:
+                import shutil
+                shutil.rmtree(gt_png_dir, ignore_errors=True)
+                shutil.rmtree(pred_png_dir, ignore_errors=True)
+
+        except Exception as e:
+            logger.warning(f"Error processing scene {scene_id}: {e}")
+            import traceback
+            traceback.print_exc()
+            scenes_skipped += 1
+            continue
+
+    # ---------------------------------------------------------------
+    # Average metrics across all scenes
+    # ---------------------------------------------------------------
+    logger.info(f"\nEvaluation complete: {scenes_evaluated} scenes evaluated, "
+                f"{scenes_skipped} scenes skipped")
+
+    if scenes_evaluated == 0:
+        logger.error("No scenes were successfully evaluated!")
         return {}
 
-    # ---------------------------------------------------------------
-    # Build COCO-format JSONs and call panopticapi.evaluation.pq_compute
-    # ---------------------------------------------------------------
-    logger.info("Assembling COCO-format JSONs for panopticapi evaluation...")
+    # Compute macro-average across scenes
+    metric_keys = ["PQ", "SQ", "RQ", "PQ_th", "SQ_th", "RQ_th", "PQ_st", "SQ_st", "RQ_st"]
+    avg_results = OrderedDict()
+    for key in metric_keys:
+        values = [per_scene_results[s][key] for s in per_scene_results]
+        avg_results[key] = np.mean(values)
 
-    gt_json_data = {
-        "images": images_list,
-        "annotations": gt_annotations,
-        "categories": categories,
-    }
-    gt_json_path = os.path.join(output_dir, "gt_panoptic.json")
-    with open(gt_json_path, "w") as f:
-        json.dump(gt_json_data, f)
+    # Average per-view PQ metrics
+    avg_per_view_pq_values = [per_scene_results[s]["avg_per_view_pq"] for s in per_scene_results]
+    avg_results["avg_per_view_pq"] = float(np.mean(avg_per_view_pq_values))
+    pq_var_values = [per_scene_results[s]["pq_variance"] for s in per_scene_results]
+    avg_results["pq_variance"] = float(np.mean(pq_var_values))
+    pq_std_values = [per_scene_results[s]["pq_std"] for s in per_scene_results]
+    avg_results["pq_std"] = float(np.mean(pq_std_values))
 
-    pred_json_data = {
-        "images": images_list,
-        "annotations": pred_annotations,
-        "categories": categories,
-    }
-    pred_json_path = os.path.join(output_dir, "pred_panoptic.json")
-    with open(pred_json_path, "w") as f:
-        json.dump(pred_json_data, f)
+    # Compute per-view-index averages across scenes (View 0, View 1, ...)
+    max_views = max(len(per_scene_results[s]["per_view_pq"]) for s in per_scene_results)
+    for vi in range(max_views):
+        vi_pqs = [per_scene_results[s]["per_view_pq"][vi]
+                  for s in per_scene_results
+                  if vi < len(per_scene_results[s]["per_view_pq"])]
+        avg_results[f"PQ_view_{vi}"] = float(np.mean(vi_pqs)) if vi_pqs else 0.0
 
-    logger.info(f"GT JSON: {gt_json_path}  ({len(gt_annotations)} annotations)")
-    logger.info(f"Pred JSON: {pred_json_path}  ({len(pred_annotations)} annotations)")
-    logger.info(f"GT PNGs: {gt_png_dir}")
-    logger.info(f"Pred PNGs: {pred_png_dir}")
+    # Average cross-view consistency metrics
+    cc_values = [per_scene_results[s]["class_consistency"] for s in per_scene_results]
+    avg_results["class_consistency"] = float(np.mean(cc_values))
+    miou_values = [per_scene_results[s]["mask_iou"] for s in per_scene_results]
+    avg_results["mask_iou"] = float(np.mean(miou_values))
+    qcos_values = [per_scene_results[s]["query_cosine_similarity"] for s in per_scene_results
+                   if not np.isnan(per_scene_results[s]["query_cosine_similarity"])]
+    avg_results["query_cosine_similarity"] = float(np.mean(qcos_values)) if qcos_values else float("nan")
 
-    # Run official panopticapi evaluation
-    logger.info("Running panopticapi.evaluation.pq_compute ...")
-    pq_res = pq_compute(
-        gt_json_path,
-        pred_json_path,
-        gt_folder=gt_png_dir,
-        pred_folder=pred_png_dir,
-    )
-
-    # Extract results (same format as Detectron2 COCOPanopticEvaluator)
-    results = OrderedDict()
-    results["PQ"] = 100 * pq_res["All"]["pq"]
-    results["SQ"] = 100 * pq_res["All"]["sq"]
-    results["RQ"] = 100 * pq_res["All"]["rq"]
-    results["PQ_th"] = 100 * pq_res["Things"]["pq"]
-    results["SQ_th"] = 100 * pq_res["Things"]["sq"]
-    results["RQ_th"] = 100 * pq_res["Things"]["rq"]
-    results["PQ_st"] = 100 * pq_res["Stuff"]["pq"]
-    results["SQ_st"] = 100 * pq_res["Stuff"]["sq"]
-    results["RQ_st"] = 100 * pq_res["Stuff"]["rq"]
-    results["n_classes_all"] = pq_res["All"]["n"]
-    results["n_classes_things"] = pq_res["Things"]["n"]
-    results["n_classes_stuff"] = pq_res["Stuff"]["n"]
-    results["num_images"] = total_images
-
-    # Also extract per-class results if available
-    per_class_results = {}
-    if "per_class" in pq_res:
-        for cat_id, metrics in pq_res["per_class"].items():
-            per_class_results[int(cat_id)] = {
-                "PQ": metrics["pq"] * 100,
-                "SQ": metrics["sq"] * 100,
-                "RQ": metrics["rq"] * 100,
-            }
-    results["per_class"] = per_class_results
+    avg_results["num_views_per_scene"] = num_views
+    avg_results["num_scenes_evaluated"] = scenes_evaluated
+    avg_results["num_scenes_skipped"] = scenes_skipped
+    avg_results["num_scenes_total"] = len(val_scenes)
 
     # ---------------------------------------------------------------
     # Print results
     # ---------------------------------------------------------------
-    logger.info("=" * 70)
-    logger.info("EVALUATION RESULTS (panopticapi)")
-    logger.info("=" * 70)
-    logger.info(f"Total images evaluated: {total_images}")
-    logger.info(f"Skipped images: {skipped_images}")
-    logger.info(f"Active classes (all): {results['n_classes_all']}")
-    logger.info(f"Active classes (things): {results['n_classes_things']}")
-    logger.info(f"Active classes (stuff): {results['n_classes_stuff']}")
-    logger.info("-" * 70)
-    logger.info(f"  PQ  = {results['PQ']:.2f}   SQ  = {results['SQ']:.2f}   RQ  = {results['RQ']:.2f}")
-    logger.info(f"  PQ_th = {results['PQ_th']:.2f}   SQ_th = {results['SQ_th']:.2f}   RQ_th = {results['RQ_th']:.2f}")
-    logger.info(f"  PQ_st = {results['PQ_st']:.2f}   SQ_st = {results['SQ_st']:.2f}   RQ_st = {results['RQ_st']:.2f}")
-    logger.info("=" * 70)
+    logger.info("=" * 80)
+    logger.info(f"EVALUATION RESULTS — Multi-View ({num_views} views/scene, query propagation)")
+    logger.info("=" * 80)
+    logger.info(f"Scenes evaluated: {scenes_evaluated} / {len(val_scenes)}")
+    logger.info(f"Scenes skipped:   {scenes_skipped}")
+    logger.info(f"Views per scene:  {num_views} (1 ref + {num_views - 1} targets)")
+    logger.info(f"Image resolution: {target_short_edge}×{max_size} (short edge × max size)")
+    logger.info(f"Post-processing:  overlap_thr={overlap_threshold}, mask_thr={object_mask_threshold}")
+    logger.info("  Note: Post-processing thresholds affect PQ/SQ/RQ, NOT cross-view metrics.")
+    logger.info("-" * 80)
+    logger.info("  [Panoptic Quality]")
+    logger.info(f"  PQ    = {avg_results['PQ']:.2f}   SQ    = {avg_results['SQ']:.2f}   RQ    = {avg_results['RQ']:.2f}")
+    logger.info(f"  PQ_th = {avg_results['PQ_th']:.2f}   SQ_th = {avg_results['SQ_th']:.2f}   RQ_th = {avg_results['RQ_th']:.2f}")
+    logger.info(f"  PQ_st = {avg_results['PQ_st']:.2f}   SQ_st = {avg_results['SQ_st']:.2f}   RQ_st = {avg_results['RQ_st']:.2f}")
+    logger.info("-" * 80)
+    logger.info("  [Per-View PQ Breakdown]")
+    view_pq_parts = [f"  View {vi} ({'Ref' if vi == 0 else 'Tgt'}) = {avg_results.get(f'PQ_view_{vi}', 0.0):.2f}"
+                     for vi in range(max_views)]
+    logger.info("  " + "   ".join(view_pq_parts))
+    logger.info(f"  Average PQ = {avg_results['avg_per_view_pq']:.2f}   "
+                f"Variance = {avg_results['pq_variance']:.4f}   "
+                f"Std = {avg_results['pq_std']:.2f}")
+    logger.info("-" * 80)
+    logger.info("  [Cross-View Consistency - Query Propagation Performance]")
+    logger.info(f"  Class Consistency        = {avg_results['class_consistency']:.4f}  (target: >0.80, measures semantic identity)")
+    qcos_str = f"{avg_results['query_cosine_similarity']:.4f}" if not np.isnan(avg_results['query_cosine_similarity']) else "N/A"
+    logger.info(f"  Query Cosine Similarity  = {qcos_str}  (target: >0.85, measures feature alignment)")
+    logger.info(f"  Mask IoU                 = {avg_results['mask_iou']:.4f}  (informational only - no geometric coupling)")
+    logger.info("  ")
+    logger.info("  Note: Mask IoU is expected to be lower without warped attention guidance.")
+    logger.info("        Focus on Class Consistency + Query Similarity for query propagation quality.")
+    logger.info("=" * 80)
+
+    # Per-scene breakdown table
+    logger.info("\nPer-Scene Breakdown:")
+    logger.info(f"{'Scene':<25} {'Ref View':<15} {'PQ':>6} {'SQ':>6} {'RQ':>6}  "
+                f"{'AvgPQ':>6} {'PQVar':>7} {'ClsCon':>7} {'MskIoU':>7} {'QCos':>6}")
+    logger.info("-" * 110)
+    for scene_id in sorted(per_scene_results.keys()):
+        m = per_scene_results[scene_id]
+        qcos_val = f"{m['query_cosine_similarity']:.3f}" if not np.isnan(m['query_cosine_similarity']) else "  N/A"
+        logger.info(
+            f"{scene_id:<25} {m['reference_view']:<15} "
+            f"{m['PQ']:6.2f} {m['SQ']:6.2f} {m['RQ']:6.2f}  "
+            f"{m['avg_per_view_pq']:6.2f} {m['pq_variance']:7.4f} "
+            f"{m['class_consistency']:7.4f} {m['mask_iou']:7.4f} {qcos_val:>6}"
+        )
 
     # ---------------------------------------------------------------
     # Save results
     # ---------------------------------------------------------------
-    # 1. Summary JSON
+    # 1. Summary JSON (averages)
     summary_path = os.path.join(output_dir, "evaluation_summary.json")
-    summary = {k: v for k, v in results.items() if k != "per_class"}
-    summary["skipped_images"] = skipped_images
+    summary = {k: float(v) if isinstance(v, (np.floating, float)) else v
+               for k, v in avg_results.items()}
     with open(summary_path, "w") as f:
         json.dump(summary, f, indent=2)
     logger.info(f"Summary saved to {summary_path}")
 
-    # 2. Per-class CSV
-    if per_class_results:
-        per_class_csv_path = os.path.join(output_dir, "per_class_metrics.csv")
-        with open(per_class_csv_path, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["category_id", "PQ", "SQ", "RQ"])
-            for cat_id in sorted(per_class_results.keys()):
-                m = per_class_results[cat_id]
-                writer.writerow([
-                    cat_id, f"{m['PQ']:.2f}", f"{m['SQ']:.2f}", f"{m['RQ']:.2f}",
-                ])
-        logger.info(f"Per-class metrics saved to {per_class_csv_path}")
+    # 2. Per-scene CSV
+    per_scene_csv_path = os.path.join(output_dir, "per_scene_metrics.csv")
+    # Build dynamic per-view PQ column headers
+    view_pq_headers = [f"PQ_view_{vi}" for vi in range(max_views)]
+    with open(per_scene_csv_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            ["scene_id", "reference_view", "num_views", "PQ", "SQ", "RQ",
+             "PQ_th", "SQ_th", "RQ_th", "PQ_st", "SQ_st", "RQ_st"]
+            + view_pq_headers
+            + ["avg_per_view_pq", "pq_variance", "pq_std",
+               "class_consistency", "mask_iou", "query_cosine_similarity"]
+        )
+        for scene_id in sorted(per_scene_results.keys()):
+            m = per_scene_results[scene_id]
+            view_pq_vals = [f"{m['per_view_pq'][vi]:.2f}"
+                           if vi < len(m['per_view_pq']) else ""
+                           for vi in range(max_views)]
+            qcos_val = f"{m['query_cosine_similarity']:.4f}" if not np.isnan(m['query_cosine_similarity']) else ""
+            writer.writerow(
+                [scene_id, m["reference_view"], m["num_views"],
+                 f"{m['PQ']:.2f}", f"{m['SQ']:.2f}", f"{m['RQ']:.2f}",
+                 f"{m['PQ_th']:.2f}", f"{m['SQ_th']:.2f}", f"{m['RQ_th']:.2f}",
+                 f"{m['PQ_st']:.2f}", f"{m['SQ_st']:.2f}", f"{m['RQ_st']:.2f}"]
+                + view_pq_vals
+                + [f"{m['avg_per_view_pq']:.2f}", f"{m['pq_variance']:.4f}", f"{m['pq_std']:.2f}",
+                   f"{m['class_consistency']:.4f}", f"{m['mask_iou']:.4f}", qcos_val]
+            )
+    logger.info(f"Per-scene metrics saved to {per_scene_csv_path}")
 
-    # 3. Optionally keep prediction PNGs for inspection
+    # 3. Clean up per_scene directory if not saving predictions
     if not save_predictions:
         import shutil
-        shutil.rmtree(pred_png_dir, ignore_errors=True)
-        shutil.rmtree(gt_png_dir, ignore_errors=True)
-        logger.info("Cleaned up temp PNG directories (use --save-predictions to keep)")
+        per_scene_dir = os.path.join(output_dir, "per_scene")
+        shutil.rmtree(per_scene_dir, ignore_errors=True)
+        logger.info("Cleaned up per-scene temp directories (use --save-predictions to keep)")
 
-    return results
+    return {**avg_results, "per_scene": per_scene_results}
 
 
 # ============================================================
@@ -886,7 +1426,7 @@ def evaluate(
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Evaluate Multi-View Mask2Former on ScanNet++ validation set"
+        description="Evaluate Multi-View Mask2Former on ScanNet++ validation set (per-scene)"
     )
     parser.add_argument(
         "--config-file",
@@ -922,7 +1462,19 @@ def parse_args():
         "--val-split",
         type=str,
         default=None,
-        help="Override path to validation split file",
+        help="Path to validation split file (unused — scenes are discovered from panoptic-val-root)",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for reference view selection (None = random each run)",
+    )
+    parser.add_argument(
+        "--num-views",
+        type=int,
+        default=None,
+        help="Number of views per scene (1 ref + N-1 targets). Defaults to config NUM_VIEWS.",
     )
     parser.add_argument(
         "--num-classes",
@@ -1020,6 +1572,7 @@ def main():
         "VAL_SPLIT", f"{scannetpp_root}/splits/nvs_sem_val_clean.txt"
     )
     num_classes = args.num_classes or cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES
+    num_views = args.num_views or cfg.MODEL.MULTIVIEW.NUM_VIEWS
     checkpoint_path = cfg.MODEL.WEIGHTS
 
     logger.info(f"Config file: {args.config_file}")
@@ -1028,6 +1581,7 @@ def main():
     logger.info(f"Panoptic val root: {panoptic_val_root}")
     logger.info(f"Val split: {val_split}")
     logger.info(f"Num classes: {num_classes}")
+    logger.info(f"Num views: {num_views}")
     logger.info(f"Output dir: {args.output_dir}")
 
     # ---- Load model ----
@@ -1041,12 +1595,14 @@ def main():
         val_split_file=val_split,
         output_dir=args.output_dir,
         num_classes=num_classes,
+        num_views=num_views,
         target_short_edge=args.target_short_edge,
         max_size=args.max_size,
         overlap_threshold=args.overlap_threshold,
         object_mask_threshold=args.object_mask_threshold,
         max_images_per_scene=args.max_images_per_scene,
         save_predictions=args.save_predictions,
+        seed=args.seed,
     )
 
     logger.info("Evaluation complete!")

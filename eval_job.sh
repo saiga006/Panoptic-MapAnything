@@ -5,20 +5,26 @@
 #SBATCH --cpus-per-task=32         # CPU cores per task (adjust based on availability)
 #SBATCH --mem=185G                 # Memory per node
 #SBATCH --gres=gpu:1               # Number of GPUs per node (1-4 for gpu4, 1-4 for gpu)
-#SBATCH --time=0:30:00            # Time limit hrs:min:sec
+#SBATCH --time=9:30:00            # Time limit hrs:min:sec
 #SBATCH --output=slurm_%j.out      # Standard output log
 #SBATCH --error=slurm_%j.err       # Standard error log
 
 # =============================================================================
-# EVALUATION SCRIPT FOR MULTI-VIEW MASK2FORMER ON SCANNET++ VALIDATION SET
+# PER-SCENE EVALUATION SCRIPT FOR MULTI-VIEW MASK2FORMER ON SCANNET++
 #
-# Computes PQ, SQ, RQ metrics on panoptic_val annotations.
+# Discovers all scenes in panoptic_val directory (48 val scenes).
+# For each scene, picks a random reference view (overlap-aware selection
+# from m2f_inference.py), runs single-view inference, computes per-scene
+# PQ/SQ/RQ, then macro-averages across all scenes.
 #
 # Usage:
 #   sbatch eval_job.sh
 #
 # To override the checkpoint path:
 #   sbatch --export=ALL,CHECKPOINT=/path/to/model_final.pth eval_job.sh
+#
+# To set a reproducible seed for reference view selection:
+#   sbatch --export=ALL,SEED=42 eval_job.sh
 # =============================================================================
 
 # 1. Load necessary modules (adjust versions if needed)
@@ -55,7 +61,7 @@ export CUDA_LAUNCH_BLOCKING=1
 export TORCH_DISTRIBUTED_DEBUG=DETAIL
 
 # =============================================================================
-# TRAINING LAUNCH
+# EVALUATION LAUNCH
 # =============================================================================
 
 # Automatically detect number of GPUs assigned by Slurm
@@ -67,18 +73,13 @@ else
     NUM_GPUS=$((NUM_GPUS + 1))
 fi
 
-echo "Detected $NUM_GPUS GPUs. Launching training..."
-
-# Run the training script
-# We use detectron2's launch utility to handle multi-GPU distributed training
+echo "Detected $NUM_GPUS GPUs. Launching evaluation..."
 
 # Set paths for the new cluster
 export MASK2FORMER_ROOT=/work/sramam2s/Mask2Former
 export SCANNETPP_ROOT=${MASK2FORMER_ROOT}/datasets/scannet/scannetpp
 export PANOPTIC_ROOT=${SCANNETPP_ROOT}/panoptic
 export PANOPTIC_VAL_ROOT=${SCANNETPP_ROOT}/panoptic_val
-export SPLIT_DIR=${SCANNETPP_ROOT}/splits
-export VAL_SPLIT=${SPLIT_DIR}/nvs_sem_val_clean.txt
 
 cd ${MASK2FORMER_ROOT}
 
@@ -95,27 +96,38 @@ CHECKPOINT=${CHECKPOINT:-"output_multiview_8a40_warped_attention/model_final.pth
 # Output directory for evaluation results
 OUTPUT_DIR=${OUTPUT_DIR:-"eval_results/$(date +%Y%m%d_%H%M%S)"}
 
+# Random seed for reference view selection (None = random each run)
+# Override via environment variable SEED or edit here
+SEED=${SEED:-"42"}
+
 echo ""
 echo "Config: ${CONFIG_FILE}"
 echo "Checkpoint: ${CHECKPOINT}"
 echo "Output dir: ${OUTPUT_DIR}"
-echo "Val split: ${VAL_SPLIT}"
 echo "Panoptic val root: ${PANOPTIC_VAL_ROOT}"
+echo "Seed: ${SEED:-None (random)}"
 echo ""
 
-# Run evaluation
+# Build optional seed argument
+SEED_ARG=""
+if [ -n "$SEED" ]; then
+    SEED_ARG="--seed ${SEED}"
+fi
+
+# Run per-scene evaluation
 python m2f_evaluate.py \
     --config-file ${CONFIG_FILE} \
     --checkpoint ${CHECKPOINT} \
     --output-dir ${OUTPUT_DIR} \
     --scannetpp-root ${SCANNETPP_ROOT} \
     --panoptic-val-root ${PANOPTIC_VAL_ROOT} \
-    --val-split ${VAL_SPLIT} \
     --target-short-edge 480 \
     --max-size 640 \
-    --overlap-threshold 0.8 \
-    --object-mask-threshold 0.8 \
+    --num-views 3 \
+    --overlap-threshold 0.6 \
+    --object-mask-threshold 0.6 \
     --save-predictions \
+    ${SEED_ARG} \
     MODEL.WEIGHTS ${CHECKPOINT}
 
 echo ""

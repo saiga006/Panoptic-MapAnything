@@ -192,6 +192,90 @@ from m2f_train_3d_loss import (
 
 
 # ============================================================
+# SAFE HUNGARIAN MATCHER (Fix 3)
+# ============================================================
+
+class SafeHungarianMatcher(HungarianMatcher):
+    """
+    Wrapper around HungarianMatcher that adds NaN protection.
+    
+    Prevents cost matrix NaN from crashing the training by:
+    1. Clamping pred_masks sigmoid to [1e-6, 1-1e-6] before cost computation
+    2. Clamping pred_logits to [-50, 50] for numerical stability
+    3. Returning FALLBACK sequential matching on failure (DDP-safe!)
+       instead of re-raising, which would cause DDP deadlock.
+    """
+    
+    @torch.no_grad()
+    def memory_efficient_forward(self, outputs, targets):
+        """More memory-friendly matching with NaN safety."""
+        # Make a shallow copy to avoid modifying original outputs
+        outputs = {k: v for k, v in outputs.items()}
+        
+        # Clamp logits for numerical stability
+        if 'pred_logits' in outputs:
+            outputs['pred_logits'] = torch.clamp(outputs['pred_logits'], min=-50, max=50)
+        
+        # Soft clamp mask logits to prevent extreme values in cost computation
+        # (must match the soft_clamp in _compute_losses)
+        if 'pred_masks' in outputs:
+            pm = outputs['pred_masks']
+            limit, margin = 10.0, 5.0
+            above = pm > limit
+            below = pm < -limit
+            if above.any() or below.any():
+                pm = pm.clone()
+                if above.any():
+                    pm[above] = limit + margin * torch.tanh((pm[above] - limit) / margin)
+                if below.any():
+                    pm[below] = -limit - margin * torch.tanh((-pm[below] - limit) / margin)
+                outputs['pred_masks'] = pm
+        
+        try:
+            indices = super().memory_efficient_forward(outputs, targets)
+            
+            # Verify indices are valid
+            for src_idx, tgt_idx in indices:
+                if torch.isnan(src_idx.float()).any() or torch.isnan(tgt_idx.float()).any():
+                    raise RuntimeError("NaN detected in matcher indices!")
+            
+            return indices
+            
+        except Exception as e:
+            _logger = logging.getLogger(__name__)
+            _logger.warning(f"⚠️  Matcher failed: {e} — using fallback sequential matching")
+            if 'pred_masks' in outputs:
+                pm = outputs['pred_masks']
+                _logger.warning(
+                    f"  pred_masks: shape={pm.shape}, "
+                    f"range=[{pm.min():.4f}, {pm.max():.4f}], "
+                    f"nan={torch.isnan(pm).any()}, inf={torch.isinf(pm).any()}"
+                )
+            if 'pred_logits' in outputs:
+                pl = outputs['pred_logits']
+                _logger.warning(
+                    f"  pred_logits: shape={pl.shape}, "
+                    f"range=[{pl.min():.4f}, {pl.max():.4f}], "
+                    f"nan={torch.isnan(pl).any()}, inf={torch.isinf(pl).any()}"
+                )
+            
+            # FALLBACK: Return sequential matching (query i → target i).
+            # This produces suboptimal but VALID indices, allowing training to
+            # continue and keeping all DDP ranks synchronized at the next
+            # all_reduce call inside SetCriterion.
+            bs = outputs['pred_logits'].shape[0]
+            num_queries = outputs['pred_logits'].shape[1]
+            fallback_indices = []
+            for b in range(bs):
+                num_tgt = len(targets[b]["labels"])
+                n = min(num_queries, num_tgt)
+                src_idx = torch.arange(n, dtype=torch.int64, device=outputs['pred_logits'].device)
+                tgt_idx = torch.arange(n, dtype=torch.int64, device=outputs['pred_logits'].device)
+                fallback_indices.append((src_idx, tgt_idx))
+            return fallback_indices
+
+
+# ============================================================
 # POSE CONVERSION UTILITIES
 # ============================================================
 
@@ -1477,7 +1561,12 @@ class MultiViewMask2Former(nn.Module):
         super().__init__()
         
         self.num_views = cfg.MODEL.MULTIVIEW.NUM_VIEWS
-        self.warmup_iter = cfg.MODEL.MULTIVIEW.WARMUP_ITER
+        # Fix 4: Extend warmup to minimum 5000 to prevent gradient explosion
+        # when query propagation enables (3x gradient magnitude from multi-view)
+        self.warmup_iter = max(cfg.MODEL.MULTIVIEW.WARMUP_ITER, 5000)
+        if self.warmup_iter != cfg.MODEL.MULTIVIEW.WARMUP_ITER:
+            print(f"⚠️  Query propagation warmup extended to {self.warmup_iter} iterations")
+            print(f"   (Config specified {cfg.MODEL.MULTIVIEW.WARMUP_ITER})")
         
         self.register_buffer('_iter', torch.tensor(0))
         
@@ -1552,6 +1641,83 @@ class MultiViewMask2Former(nn.Module):
     @property
     def device(self):
         return next(self.parameters()).device
+
+    def get_parameter_groups(self, base_lr: float, dpt_lr: float) -> list:
+        """
+        Get parameter groups with different learning rates.
+        
+        Fix 6: Multi-view components (query propagation) get lower LR than
+        pretrained parts to prevent divergence during early training.
+        """
+        param_groups = []
+        
+        # Group 1: DPT head (dpt_lr)
+        dpt_params = []
+        for name, param in self.backbone.named_parameters():
+            if param.requires_grad and 'panoptic_dpt' in name:
+                dpt_params.append(param)
+        
+        if dpt_params:
+            param_groups.append({'params': dpt_params, 'lr': dpt_lr, 'name': 'dpt'})
+        
+        # Group 2: mask_embed + class_embed (base_lr, HIGHER weight decay)
+        # These layers directly produce mask logits (einsum of mask_embed output
+        # and mask_features) and class logits. Without sufficient weight decay,
+        # their weights grow unbounded, causing logit divergence → NaN cascade
+        # around iter 700-800. Isolating them with weight_decay=0.05 acts as a
+        # structural constraint on logit magnitude.
+        embed_params = []
+        semseg_params = []
+        for name, param in self.sem_seg_head.named_parameters():
+            if param.requires_grad:
+                if 'mask_embed' in name or 'class_embed' in name:
+                    embed_params.append(param)
+                else:
+                    semseg_params.append(param)
+        
+        if embed_params:
+            param_groups.append({
+                'params': embed_params,
+                'lr': base_lr,
+                'weight_decay': 0.05,  # Higher decay to prevent logit divergence
+                'name': 'embed_heads',
+            })
+        
+        if semseg_params:
+            param_groups.append({'params': semseg_params, 'lr': base_lr, 'name': 'semseg'})
+        
+        # Group 3: Query propagation decoder (10× lower LR - NEW COMPONENT!)
+        # These parameters are critical: too-high LR causes gradient explosion
+        # when query propagation enables after warmup
+        qp_params = []
+        if hasattr(self, 'query_propagation_decoder'):
+            for name, param in self.query_propagation_decoder.named_parameters():
+                if param.requires_grad:
+                    # Skip params already in sem_seg_head (shared decoder)
+                    # Only include truly new parameters added by QueryPropagationTransformerDecoder
+                    is_shared = False
+                    for existing_group in param_groups:
+                        for existing_param in existing_group['params']:
+                            if existing_param.data_ptr() == param.data_ptr():
+                                is_shared = True
+                                break
+                        if is_shared:
+                            break
+                    if not is_shared:
+                        qp_params.append(param)
+        
+        if qp_params:
+            param_groups.append({
+                'params': qp_params,
+                'lr': base_lr * 0.1,  # 10× lower for new components
+                'name': 'query_propagation'
+            })
+        
+        print(f"Parameter groups: DPT({len(dpt_params)}), "
+              f"EmbedHeads({len(embed_params)}), "
+              f"SemSeg({len(semseg_params)}), QueryProp({len(qp_params)})")
+        
+        return param_groups
 
     def load_single_view_pretrained(self, checkpoint_path: str):
         """
@@ -1673,7 +1839,7 @@ class MultiViewMask2Former(nn.Module):
         log(f"{'='*60}\n")
 
     def _build_criterion(self, cfg):
-        """Build the Mask2Former loss criterion."""
+        """Build the Mask2Former loss criterion with NaN-safe matcher."""
         # Loss weights
         class_weight = cfg.MODEL.MASK_FORMER.CLASS_WEIGHT
         dice_weight = cfg.MODEL.MASK_FORMER.DICE_WEIGHT
@@ -1681,13 +1847,14 @@ class MultiViewMask2Former(nn.Module):
         no_object_weight = cfg.MODEL.MASK_FORMER.NO_OBJECT_WEIGHT
         deep_supervision = cfg.MODEL.MASK_FORMER.DEEP_SUPERVISION
         
-        # Build matcher
-        matcher = HungarianMatcher(
+        # Fix 3: Use SafeHungarianMatcher with NaN protection
+        matcher = SafeHungarianMatcher(
             cost_class=class_weight,
             cost_mask=mask_weight,
             cost_dice=dice_weight,
             num_points=cfg.MODEL.MASK_FORMER.TRAIN_NUM_POINTS,
         )
+        print(f"  ✓ Using SafeHungarianMatcher (NaN-protected)")
         
         # Weight dict
         weight_dict = {
@@ -1721,10 +1888,14 @@ class MultiViewMask2Former(nn.Module):
         """
         Get loss weights. All losses active from iter 0 (standard Mask2Former).
         
-        Weights: CE=1.0, Mask=5.0, Dice=3.0
-        - Dice is dominant (3.0) to force foreground prediction
-        - CE at 1.0 matches Hungarian matcher cost_class=1.0
-        - No warmup: matches standard Mask2Former and working single-view script
+        Weights from config: CE=5.0, Mask=2.0, Dice=5.0
+        - CE at 5.0: strong classification gradients with 254 classes
+        - Dice at 5.0: dominant to force foreground prediction
+        - Mask (BCE) at 2.0: reduced because BCE has negative pressure on
+          unmatched queries + background pixels. Dice:Mask ratio = 2.5:1.
+        
+        NOTE: Transfer learning from single-view checkpoint is critical.
+        Without it, mask logits collapse to -12 regardless of weight ratio.
         """
         weights = {
             'loss_ce': self._base_class_weight,
@@ -1754,6 +1925,64 @@ class MultiViewMask2Former(nn.Module):
             view_features[key] = all_view_features[key][view_idx]  # [B, C, H', W']
         return view_features
     
+    @staticmethod
+    def _validate_batch(batched_inputs: Dict) -> Tuple[bool, str]:
+        """
+        Pre-validate a batch before expensive forward pass.
+        
+        Checks for NaN/Inf in images, poses, intrinsics, and depth.
+        Also checks for degenerate GT (empty instances for ALL views).
+        
+        Returns:
+            (is_valid, reason): Tuple of validity flag and failure reason string.
+        """
+        # Check images
+        images = batched_inputs.get('images')
+        if images is not None:
+            if torch.isnan(images).any():
+                return False, "NaN in input images"
+            if torch.isinf(images).any():
+                return False, "Inf in input images"
+        
+        # Check camera poses
+        poses = batched_inputs.get('camera_poses')
+        if poses is not None:
+            if torch.isnan(poses).any():
+                return False, "NaN in camera poses"
+            if torch.isinf(poses).any():
+                return False, "Inf in camera poses"
+        
+        # Check camera intrinsics
+        intrinsics = batched_inputs.get('camera_intrinsics')
+        if intrinsics is not None:
+            if torch.isnan(intrinsics).any():
+                return False, "NaN in camera intrinsics"
+            if torch.isinf(intrinsics).any():
+                return False, "Inf in camera intrinsics"
+            # Check for degenerate intrinsics (zero focal length)
+            fx = intrinsics[..., 0, 0]
+            fy = intrinsics[..., 1, 1]
+            if (fx.abs() < 1e-6).any() or (fy.abs() < 1e-6).any():
+                return False, "Degenerate intrinsics (zero focal length)"
+        
+        # Check depth if present
+        depth = batched_inputs.get('depth')
+        if depth is not None:
+            if torch.isnan(depth).any():
+                return False, "NaN in depth maps"
+            if torch.isinf(depth).any():
+                return False, "Inf in depth maps"
+        
+        # Check GT instances — if ALL views have 0 instances, the Hungarian
+        # matcher will produce empty indices which can cause indexing errors
+        instances = batched_inputs.get('instances', [])
+        if instances:
+            total_gt = sum(len(inst) for inst in instances)
+            if total_gt == 0:
+                return False, "All views have 0 GT instances (empty scene)"
+        
+        return True, ""
+
     def forward(self, batched_inputs: Dict) -> Dict:
         """
         Forward pass with query propagation across views.
@@ -1889,22 +2118,56 @@ class MultiViewMask2Former(nn.Module):
         # Prepare targets in criterion format
         prepared_targets = self.prepare_targets(targets, h_pad, w_pad)
         
-        # Clamp mask logits before loss to prevent fp16 overflow
+        # Fix 1 (v2): SOFT clamp mask logits for numerical stability.
+        # Hard clamp(-10, 10) kills gradient flow for extreme logits, creating a
+        # "pressure cooker" effect where weights diverge but losses look fine —
+        # until logits blow past the clamp in one step, causing NaN cascade.
+        # Soft clamp uses tanh to smoothly compress values beyond the boundary
+        # while ALWAYS providing gradient signal back toward the safe range.
+        def soft_clamp_logits(logits, limit=10.0):
+            """Soft clamp: linear in [-limit, limit], tanh compression outside."""
+            # Inside [-limit, limit]: pass through unchanged
+            # Outside: smoothly compress to asymptote at ±(limit + margin)
+            margin = 5.0  # How far beyond limit the asymptote is
+            # For values outside [-limit, limit], use tanh to compress
+            above = logits > limit
+            below = logits < -limit
+            if above.any() or below.any():
+                result = logits.clone()
+                # For values above limit: limit + margin * tanh((x - limit) / margin)
+                if above.any():
+                    result[above] = limit + margin * torch.tanh((logits[above] - limit) / margin)
+                # For values below -limit: -limit - margin * tanh((-x - limit) / margin)
+                if below.any():
+                    result[below] = -limit - margin * torch.tanh((-logits[below] - limit) / margin)
+                return result
+            return logits
+        
         if 'pred_masks' in outputs:
-            outputs['pred_masks'] = outputs['pred_masks'].clamp(min=-20.0, max=20.0)
+            outputs['pred_masks'] = soft_clamp_logits(outputs['pred_masks'])
         if 'aux_outputs' in outputs:
             for aux in outputs['aux_outputs']:
                 if 'pred_masks' in aux:
-                    aux['pred_masks'] = aux['pred_masks'].clamp(min=-20.0, max=20.0)
+                    aux['pred_masks'] = soft_clamp_logits(aux['pred_masks'])
         
-        # Compute raw losses using criterion
+        # Compute raw losses using criterion.
+        # NOTE: We do NOT wrap this in try/except. Previously we caught exceptions
+        # and returned disconnected zero tensors, but this caused DDP collective
+        # mismatch: the replacement tensors had no connection to model parameters,
+        # so DDP's backward gradient all_reduce diverged across ranks → crash.
+        # Instead, we rely on SafeHungarianMatcher's fallback matching to handle
+        # any matcher failures gracefully without breaking the computation graph.
         losses = self.criterion(outputs, prepared_targets)
         
-        # NaN safety: replace any NaN losses with zero to prevent crash
+        # NaN safety: zero out NaN/Inf losses while PRESERVING the computation
+        # graph. We use torch.nan_to_num which is differentiable and keeps the
+        # tensor connected to model parameters via autograd. This ensures DDP's
+        # backward gradient all_reduce stays synchronized across all ranks.
+        # (Using zeros_like or *0 would disconnect or propagate NaN.)
         for k in list(losses.keys()):
             if torch.isnan(losses[k]).any() or torch.isinf(losses[k]).any():
-                print(f"  ⚠️  NaN/Inf detected in {k}, zeroing out")
-                losses[k] = torch.zeros_like(losses[k])
+                print(f"  ⚠️  NaN/Inf detected in {k}, sanitizing via nan_to_num")
+                losses[k] = torch.nan_to_num(losses[k], nan=0.0, posinf=0.0, neginf=0.0)
         
         # Get dynamic weights (progressive dice loss)
         dynamic_weights = self._get_dynamic_loss_weights()
@@ -1993,10 +2256,35 @@ class MultiViewMask2Former(nn.Module):
         ref_queries = ref_outputs['query_embeddings']  # [Q, B, D]
         ref_pred_masks = ref_outputs['pred_masks']     # [B, Q, H, W]
         
+        # Fix 5: Diagnostic logging every 10 iterations to catch mask logit drift
+        current_iter = self._iter.item() if isinstance(self._iter, torch.Tensor) else self._iter
+        if current_iter % 10 == 0 and current_iter > 0:
+            with torch.no_grad():
+                if 'pred_masks' in ref_outputs:
+                    mask_logits = ref_outputs['pred_masks']
+                    logger.info(
+                        f"[Iter {current_iter}] Mask logits: "
+                        f"min={mask_logits.min():.2f}, "
+                        f"max={mask_logits.max():.2f}, "
+                        f"mean={mask_logits.mean():.2f}"
+                    )
+                    # Warning if approaching danger zone
+                    if mask_logits.min() < -8 or mask_logits.max() > 8:
+                        logger.warning(
+                            f"⚠️  Mask logits entering danger zone at iter {current_iter}! "
+                            f"Range: [{mask_logits.min():.2f}, {mask_logits.max():.2f}]"
+                        )
+        
         # Get reference view's pose and intrinsics
         ref_pose = camera_poses[:, ref_view_idx]      # [B, 4, 4]
         ref_intrinsic = camera_intrinsics[:, ref_view_idx]  # [B, 3, 3]
         ref_depth = depth[:, ref_view_idx] if has_depth else None  # [B, 1, H, W]
+        
+        # Save raw (pre-clamp) mask logits for regularization loss later.
+        # _compute_losses applies soft_clamp which replaces outputs['pred_masks']
+        # in the dict, but the original tensor is still alive via this reference.
+        # We need gradients to flow through this for the regularization penalty.
+        raw_ref_mask_logits = ref_outputs.get('pred_masks', None)
         
         # Compute loss for reference view
         # We pass target_size=(H, W) to ensure targets are prepared at full resolution
@@ -2058,7 +2346,11 @@ class MultiViewMask2Former(nn.Module):
         
         N = len(target_losses_list) + 1  # Total views (ref + targets)
         ref_weight = 1.0                 # Reference at full weight
-        target_weight = 1.0 / N          # Scale targets: 1/3 for 3 views
+        target_weight = 0.67 / N             # Target views at full weight (averaged across targets)
+        # Previously target_weight=1/N over-dampened target gradients.
+        # With averaging across target views, the per-view signal is already
+        # diluted. Keeping weight=1.0 ensures target views train as strongly
+        # as the reference view. Total loss ≈ ref_loss + avg(target_losses).
         
         # Reference view losses (full weight)
         for key, val in ref_losses.items():
@@ -2095,6 +2387,32 @@ class MultiViewMask2Former(nn.Module):
                 total_losses['_target_loss_dice_avg'] = sum(get_detached(tl, 'loss_dice') for tl in target_losses_list) / len(target_losses_list)
         
         # ========================================
+        # Mask Logit Regularization Loss
+        # ========================================
+        # Penalize extreme mask logit magnitudes to prevent divergence.
+        # This acts as a "soft spring" pulling logits toward [-10, 10].
+        # Only penalizes logits whose absolute value exceeds the threshold.
+        # We use raw_ref_mask_logits (saved BEFORE _compute_losses applies soft_clamp)
+        # so the regularization sees the true logit magnitudes AND has gradients.
+        #
+        # CRITICAL DDP NOTE: This loss MUST always be computed (not conditional
+        # on excess.any()) so that every DDP rank has the same computation graph.
+        # Conditional branches that differ per-rank cause backward all_reduce mismatch.
+        logit_reg_threshold = 10.0
+        logit_reg_weight = 0.01  # Small weight — just prevent runaway
+        
+        if raw_ref_mask_logits is not None:
+            # Sanitize NaN/Inf in raw logits — these can appear from AMP overflow
+            # in the mask_embed einsum. nan_to_num replaces them with 0, which
+            # means excess=0 for those entries → no penalty, no NaN propagation.
+            safe_logits = torch.nan_to_num(raw_ref_mask_logits, nan=0.0, posinf=0.0, neginf=0.0)
+            # Penalty: mean of (|logit| - threshold)^2 for logits beyond threshold
+            # .clamp(min=0.0) makes excess=0 for logits in [-threshold, threshold]
+            # so their contribution to the mean is 0 (no branch needed).
+            excess = (safe_logits.abs() - logit_reg_threshold).clamp(min=0.0)
+            logit_reg_loss = logit_reg_weight * (excess ** 2).mean()
+            total_losses['loss_logit_reg'] = logit_reg_loss
+        
         # Gradient Diagnostics (every 20 iters)
         # ========================================
         current_iter = self._iter.item() if isinstance(self._iter, torch.Tensor) else self._iter
@@ -2119,18 +2437,33 @@ class MultiViewMask2Former(nn.Module):
                 if mask_logits.max().item() < -10:
                     print("  ⚠️  WARNING: Mask logits very negative - masks may be collapsing!")
         
-        # Final NaN/Inf safety: zero out any NaN losses to prevent crash
+        # Fix 7: Batch-level NaN check with scene info for debugging.
+        # Use nan_to_num (graph-preserving) instead of zeros_like (disconnected)
+        # to keep the computation graph identical across DDP ranks.
         nan_detected = False
         for k in list(total_losses.keys()):
             if k.startswith('_'):
                 continue  # Skip diagnostic keys
             val = total_losses[k]
             if isinstance(val, torch.Tensor) and (torch.isnan(val).any() or torch.isinf(val).any()):
-                print(f"  ⚠️  NaN/Inf in total_losses['{k}'], zeroing out")
-                total_losses[k] = torch.zeros_like(val)
+                logger.warning(f"⚠️  NaN/Inf detected in '{k}' at iter {self._iter.item()}, sanitizing")
+                total_losses[k] = torch.nan_to_num(val, nan=0.0, posinf=0.0, neginf=0.0)
                 nan_detected = True
+        
         if nan_detected:
-            print(f"  ⚠️  NaN detected at iter {current_iter if current_iter % 20 == 0 else self._iter.item()}, skipping this batch gracefully")
+            # Log problematic batch info for debugging
+            iter_val = self._iter.item()
+            logger.error(f"❌ NaN detected at iteration {iter_val}!")
+            scene_ids = []
+            if isinstance(batched_inputs, dict):
+                # Try to extract scene IDs from batched inputs
+                for key in ['scene_id', 'scene_ids', 'file_name']:
+                    if key in batched_inputs:
+                        scene_ids = batched_inputs[key]
+                        break
+            if scene_ids:
+                logger.error(f"   Batch scenes: {scene_ids}")
+            logger.error(f"   Continuing with zeroed losses for this batch")
         
         # Update iteration counter
         self._iter += 1
@@ -2813,6 +3146,103 @@ class GradientDiagnosticsHook(HookBase):
                 print("  ⚠️  WARNING: Very small gradients detected - possible vanishing gradient")
 
 
+class GradientClippingHook(HookBase):
+    """
+    Fix 2: Hook to ensure gradient clipping happens and add NaN sanitization.
+    
+    CRITICAL AMP FIX: This hook now handles the full unscale → sanitize → clip
+    pipeline. With AMP, gradients after backward() are SCALED (multiplied by
+    ~65536). We must unscale FIRST to get real gradient values, then sanitize
+    NaN/Inf, then clip.
+    
+    Previously, we were clipping SCALED gradients to norm=1.0, which made
+    effective gradients ~1/65536, killing all learning. And sanitizing scaled
+    NaN/Inf prevented the grad_scaler from detecting overflow and adjusting
+    its scale factor.
+    
+    NOTE: cfg and grad_scaler are stored directly because this hook is
+    registered on the AMPTrainer, whose self.trainer points to AMPTrainer
+    which does NOT have a .cfg attribute.
+    """
+    def __init__(self, cfg=None, grad_scaler=None, optimizer=None):
+        super().__init__()
+        self.cfg = cfg
+        self.grad_scaler = grad_scaler
+        self.optimizer = optimizer
+        self._nan_log_count = 0  # Throttle NaN warnings
+
+    def after_backward(self):
+        """Called after loss.backward() before optimizer.step().
+        
+        With AMP:
+        1. Unscale gradients (divide by scale factor) so we work with real values
+        2. Sanitize NaN/Inf gradients (zero them out)
+        3. Clip gradient norms
+        
+        The grad_scaler.step() will see that unscale was already called and
+        won't double-unscale. If inf was found during unscale, the scaler
+        will skip the optimizer step and reduce its scale — this is CORRECT
+        AMP behavior that we previously broke by sanitizing scaled gradients.
+        """
+        cfg = self.cfg
+        
+        # Step 1: Unscale gradients if using AMP
+        # This converts scaled gradients back to real values AND lets the
+        # scaler detect overflow (inf after unscale = overflow happened).
+        if self.grad_scaler is not None:
+            try:
+                self.grad_scaler.unscale_(self.optimizer)
+            except RuntimeError:
+                pass  # Already unscaled (shouldn't happen but be safe)
+        
+        # Step 2: Get model (unwrap DDP if necessary)
+        model = self.trainer.model
+        if hasattr(model, 'module'):
+            model = model.module
+        
+        # Step 3: Sanitize NaN/Inf in UNSCALED gradients
+        # After unscale, Inf gradients mean AMP overflow occurred.
+        # The scaler will detect these and skip the step automatically.
+        # We only sanitize actual NaN (not Inf) to let the scaler handle overflow.
+        nan_count = 0
+        inf_count = 0
+        for name, param in model.named_parameters():
+            if param.grad is not None:
+                has_nan = torch.isnan(param.grad).any()
+                has_inf = torch.isinf(param.grad).any()
+                if has_nan:
+                    # Replace NaN with 0 — these are truly corrupted
+                    param.grad.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
+                    nan_count += 1
+                if has_inf:
+                    inf_count += 1
+                    # DON'T sanitize Inf — let grad_scaler detect and handle overflow
+        
+        # Throttled logging: only log first 5 occurrences, then every 100 iters
+        if nan_count > 0:
+            self._nan_log_count += 1
+            if self._nan_log_count <= 5 or self.trainer.iter % 100 == 0:
+                logger.warning(
+                    f"⚠️  Sanitized {nan_count} NaN grads at iter {self.trainer.iter} "
+                    f"(Inf in {inf_count} params — scaler will handle)"
+                )
+        
+        # Step 4: Clip UNSCALED gradients (real values, not scaled)
+        # Only clip if there are no Inf gradients (scaler will skip step anyway)
+        if inf_count == 0 and cfg.SOLVER.CLIP_GRADIENTS.ENABLED:
+            clip_value = cfg.SOLVER.CLIP_GRADIENTS.CLIP_VALUE
+            clip_type = cfg.SOLVER.CLIP_GRADIENTS.CLIP_TYPE
+            
+            if clip_type == "norm":
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(),
+                    clip_value,
+                    norm_type=cfg.SOLVER.CLIP_GRADIENTS.NORM_TYPE
+                )
+            elif clip_type == "value":
+                torch.nn.utils.clip_grad_value_(model.parameters(), clip_value)
+
+
 class NaNGradientSafetyHook(HookBase):
     """
     Lightweight hook to sanitize NaN/Inf gradients before optimizer step.
@@ -2867,17 +3297,193 @@ class MultiViewTrainer(DefaultTrainer):
         else:
             print(f"[TRANSFER LEARNING] No pretrained checkpoint specified, training from scratch.", flush=True)
         
-        # Register NaN gradient safety hook (runs before optimizer step)
-        # NOTE: Actual gradient clipping is handled by detectron2's built-in
-        # maybe_add_gradient_clipping() which wraps the optimizer automatically
-        # when CLIP_GRADIENTS.ENABLED=True. We do NOT add a separate clipping
-        # hook — that caused DOUBLE CLIPPING in previous runs, severely
-        # dampening gradient signal and preventing mask logit recovery.
-        nan_safety_hook = NaNGradientSafetyHook()
-        self._trainer.register_hooks([nan_safety_hook])
-        logger.info(f"Registered NaN gradient safety hook")
+        # Fix 2: Register GradientClippingHook (AMP-aware unscale + NaN sanitization + clipping)
+        # This hook handles the full unscale→sanitize→clip pipeline correctly for AMP.
+        # It must have access to grad_scaler and optimizer to call unscale_() before
+        # sanitizing/clipping, so the scaler sees real gradient values.
+        grad_scaler = getattr(self._trainer, 'grad_scaler', None)
+        gradient_hook = GradientClippingHook(
+            cfg=cfg,
+            grad_scaler=grad_scaler,
+            optimizer=self.optimizer,
+        )
+        self._trainer.register_hooks([gradient_hook])
+        logger.info(f"Registered GradientClippingHook (AMP-aware unscale + sanitize + clip)")
         if cfg.SOLVER.CLIP_GRADIENTS.ENABLED:
-            logger.info(f"Gradient clipping via optimizer: type={cfg.SOLVER.CLIP_GRADIENTS.CLIP_TYPE}, value={cfg.SOLVER.CLIP_GRADIENTS.CLIP_VALUE}")
+            logger.info(f"Gradient clipping: type={cfg.SOLVER.CLIP_GRADIENTS.CLIP_TYPE}, value={cfg.SOLVER.CLIP_GRADIENTS.CLIP_VALUE}")
+        if grad_scaler is not None:
+            logger.info(f"AMP grad_scaler initial scale: {grad_scaler.get_scale()}")
+
+    def run_step(self):
+        """
+        Override detectron2's run_step to add:
+        1. Pre-forward batch validation (NaN/Inf in inputs)
+        2. Post-forward loss validation (NaN/Inf in losses)
+        3. DDP-safe batch skipping (all GPUs agree via all_reduce)
+        
+        If a batch is invalid, we skip backward+optimizer.step() entirely
+        and just zero_grad. This prevents NaN from corrupting model weights
+        and avoids NCCL timeouts from mismatched all_gather calls.
+        """
+        import time as _time
+        from torch.cuda.amp import autocast
+        
+        assert self.model.training, "[MultiViewTrainer] model was changed to eval mode!"
+        
+        start = _time.perf_counter()
+        data = next(self._trainer._data_loader_iter)
+        data_time = _time.perf_counter() - start
+        
+        # ── Pre-forward batch validation ────────────────────────────────────
+        # Check inputs on this GPU. Then synchronize the decision across all
+        # GPUs so no process proceeds to forward while another skips.
+        model_raw = self.model.module if hasattr(self.model, 'module') else self.model
+        
+        is_valid, reason = True, ""
+        if hasattr(model_raw, '_validate_batch'):
+            is_valid, reason = model_raw._validate_batch(data)
+        
+        # DDP sync: 0 = valid, 1 = invalid. If ANY GPU flags invalid, ALL skip.
+        if comm.get_world_size() > 1:
+            flag = torch.tensor([0 if is_valid else 1], dtype=torch.int64,
+                                device=next(self.model.parameters()).device)
+            torch.distributed.all_reduce(flag, op=torch.distributed.ReduceOp.MAX)
+            if flag.item() > 0:
+                if is_valid:
+                    reason = "another GPU flagged invalid batch"
+                is_valid = False
+        
+        if not is_valid:
+            logger.warning(
+                f"⚠️  Skipping batch at iter {self.iter}: {reason}. "
+                f"Scene IDs: {data.get('scene_ids', 'unknown') if isinstance(data, dict) else 'N/A'}"
+            )
+            self.optimizer.zero_grad()
+            # Still write zero metrics so detectron2's storage doesn't go stale
+            try:
+                self._trainer._write_metrics(
+                    {"total_loss": torch.tensor(0.0), "skipped_batch": torch.tensor(1.0)},
+                    data_time,
+                )
+            except Exception:
+                pass  # Don't let metrics writing crash training
+            return
+        
+        # ── Forward pass ────────────────────────────────────────────────────
+        self.optimizer.zero_grad()
+        
+        use_amp = hasattr(self._trainer, 'grad_scaler') and self._trainer.grad_scaler is not None
+        
+        if use_amp:
+            precision = getattr(self._trainer, 'precision', torch.float16)
+            with autocast(dtype=precision):
+                loss_dict = self.model(data)
+                if isinstance(loss_dict, torch.Tensor):
+                    losses = loss_dict
+                    loss_dict = {"total_loss": loss_dict}
+                else:
+                    losses = sum(loss_dict.values())
+        else:
+            loss_dict = self.model(data)
+            if isinstance(loss_dict, torch.Tensor):
+                losses = loss_dict
+                loss_dict = {"total_loss": loss_dict}
+            else:
+                losses = sum(loss_dict.values())
+        
+        # ── Post-forward loss validation ────────────────────────────────────
+        # Check if total loss is NaN/Inf. Synchronize across GPUs.
+        loss_is_bad = not torch.isfinite(losses).all()
+        
+        if comm.get_world_size() > 1:
+            flag = torch.tensor([1 if loss_is_bad else 0], dtype=torch.int64,
+                                device=losses.device)
+            torch.distributed.all_reduce(flag, op=torch.distributed.ReduceOp.MAX)
+            if flag.item() > 0:
+                loss_is_bad = True
+        
+        if loss_is_bad:
+            scene_info = data.get('scene_ids', 'unknown') if isinstance(data, dict) else 'N/A'
+            logger.error(
+                f"❌ NaN/Inf loss at iter {self.iter}, SKIPPING backward+step. "
+                f"Scenes: {scene_info}, "
+                f"loss={losses.item() if losses.numel() == 1 else 'multi'}"
+            )
+            self.optimizer.zero_grad()  # Clear any partial state
+            # Write zero metrics instead of raising FloatingPointError
+            try:
+                self._trainer._write_metrics(
+                    {"total_loss": torch.tensor(0.0), "skipped_nan_batch": torch.tensor(1.0)},
+                    data_time,
+                )
+            except Exception:
+                pass  # Don't let metrics writing crash training
+            return
+        
+        # ── Backward + optimizer step ───────────────────────────────────────
+        if use_amp:
+            self._trainer.grad_scaler.scale(losses).backward()
+        else:
+            losses.backward()
+        
+        # Dispatch after_backward to all hooks.
+        # GradientClippingHook.after_backward() handles:
+        #   1. grad_scaler.unscale_(optimizer) — converts scaled grads to real values
+        #   2. NaN sanitization on UNSCALED gradients
+        #   3. Gradient clipping on UNSCALED gradients
+        # This is the correct AMP flow. Previously we clipped SCALED gradients
+        # (multiplied by ~65536), which killed all learning.
+        for h in self._hooks + self._trainer._hooks:
+            if hasattr(h, 'after_backward'):
+                h.after_backward()
+        
+        # Write metrics — wrapped in try/except to prevent DDP deadlock.
+        # _write_metrics internally calls comm.gather() (collective operation).
+        # If one rank crashes here, all other ranks hang forever.
+        try:
+            if hasattr(self._trainer, 'async_write_metrics') and self._trainer.async_write_metrics:
+                self._trainer.concurrent_executor.submit(
+                    self._trainer._write_metrics, loss_dict, data_time, iter=self.iter
+                )
+            else:
+                self._trainer._write_metrics(loss_dict, data_time)
+        except Exception as e:
+            logger.warning(f"⚠️  _write_metrics failed at iter {self.iter}: {e}")
+        
+        # Optimizer step: grad_scaler.step() checks for inf/nan in (already unscaled)
+        # gradients. If found, it skips the step and reduces scale — this is correct
+        # AMP overflow handling. Previously our hook zeroed Inf before the scaler
+        # could see them, preventing proper scale adjustment.
+        if use_amp:
+            self._trainer.grad_scaler.step(self.optimizer)
+            self._trainer.grad_scaler.update()
+        else:
+            self.optimizer.step()
+
+    @classmethod
+    def build_optimizer(cls, cfg, model):
+        """Fix 6: Build optimizer with per-component learning rates."""
+        # Unwrap DDP
+        raw_model = model.module if hasattr(model, 'module') else model
+        
+        # Get parameter groups with different LRs
+        if hasattr(raw_model, 'get_parameter_groups'):
+            param_groups = raw_model.get_parameter_groups(
+                base_lr=cfg.SOLVER.BASE_LR,
+                dpt_lr=cfg.SOLVER.DPT_LR,
+            )
+        else:
+            # Fallback to standard
+            param_groups = [{'params': [p for p in model.parameters() if p.requires_grad]}]
+        
+        optimizer = torch.optim.AdamW(
+            param_groups,
+            lr=cfg.SOLVER.BASE_LR,
+            weight_decay=cfg.SOLVER.WEIGHT_DECAY,
+            betas=(0.9, 0.999),
+        )
+        
+        return optimizer
 
     def build_hooks(self):
         hooks = super().build_hooks()
@@ -3062,13 +3668,9 @@ class MultiViewTrainer(DefaultTrainer):
         return view_csv_path
     
     def after_train(self):
-        """Close TensorBoard writer after training completes."""
-        if self.tb_writer is not None:
-            try:
-                self.tb_writer.close()
-                logger.info("TensorBoard writer closed successfully")
-            except Exception as e:
-                print(f"Warning: Failed to close TensorBoard writer: {e}")
+        """Cleanup after training completes."""
+        # TensorBoard writer is managed by CSVMetricsLogger hook
+        pass
     
     @classmethod
     def build_train_loader(cls, cfg):
