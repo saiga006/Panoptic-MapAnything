@@ -174,6 +174,7 @@ class MultiViewPanopticInference:
         mask_threshold: float = 0.5,
         voxel_size: float = 0.02,  # 2cm voxels for deduplication
         num_classes: int = 133,
+        ref_view_weight: float = 1.5,  # Extra weight for reference view in voxel voting
     ):
         """
         Args:
@@ -183,6 +184,10 @@ class MultiViewPanopticInference:
             mask_threshold: Threshold for binary mask prediction
             voxel_size: Voxel size for point cloud deduplication
             num_classes: Number of semantic classes
+            ref_view_weight: Multiplicative weight boost for reference view
+                points during voxel voting. The reference view uses learnable
+                queries (not propagated), so its predictions are often more
+                reliable. Set to 1.0 to disable.
         """
         self.model = model.to(device).eval()
         self.device = device
@@ -190,6 +195,7 @@ class MultiViewPanopticInference:
         self.mask_threshold = mask_threshold
         self.voxel_size = voxel_size
         self.num_classes = num_classes
+        self.ref_view_weight = ref_view_weight
         
         # Generate class colors
         np.random.seed(42)
@@ -265,9 +271,10 @@ class MultiViewPanopticInference:
             print(f"  {key}: shape={feat.shape}, min={feat.min():.3f}, max={feat.max():.3f}, mean={feat.mean():.3f}, std={feat.std():.3f}")
 
         # Get depth from MapAnything if not provided
+        pts3d_world = None  # [N, H, W, 3] world-frame 3D points from MapAnything
         if depths is None:
             print("  Extracting depth from MapAnything...")
-            depths, confidences = self._get_depths_from_mapanything(
+            depths, confidences, pts3d_world = self._get_depths_from_mapanything(
                 images_batched, camera_poses_batched
             )
         else:
@@ -284,12 +291,15 @@ class MultiViewPanopticInference:
         )
         
         # Step 3: Lift 2D predictions to 3D per view
-        print("  Lifting 2D predictions to 3D...")
+        # Reference view = view 0 (same as _run_mask2former_all_views)
+        ref_idx = 0
+        print(f"  Lifting 2D predictions to 3D (ref_view={ref_idx})...")
         all_points = []
         all_instance_ids = []
         all_classes = []
         all_confs = []
         all_colors = []
+        all_view_indices = []  # Track which view each point came from
         
         for view_idx in range(N):
             pred = per_view_predictions[view_idx]
@@ -298,6 +308,11 @@ class MultiViewPanopticInference:
             pose = camera_poses[view_idx]  # [4, 4]
             K = camera_intrinsics[view_idx]  # [3, 3]
             img = images[view_idx]  # [3, H, W]
+            
+            # Use MapAnything's pts3d directly if available
+            view_pts3d = None
+            if pts3d_world is not None:
+                view_pts3d = pts3d_world[view_idx]  # [H, W, 3]
             
             points, inst_ids, classes, point_confs, colors = self._lift_to_3d(
                 pred_masks=pred['pred_masks'],      # [Q, H, W]
@@ -308,6 +323,7 @@ class MultiViewPanopticInference:
                 pose=pose,
                 intrinsics=K,
                 image=img,
+                pts3d_world=view_pts3d,             # Direct MapAnything 3D points
             )
             
             if len(points) > 0:
@@ -316,12 +332,20 @@ class MultiViewPanopticInference:
                 all_classes.append(classes)
                 all_confs.append(point_confs)
                 all_colors.append(colors)
-                print(f"    View {view_idx}: {len(points)} points")
+                # Tag each point with its source view index
+                all_view_indices.append(
+                    np.full(len(points), view_idx, dtype=np.int32)
+                )
+                print(f"    View {view_idx} ({'REF' if view_idx == ref_idx else 'TGT'}): "
+                      f"{len(points)} points")
         
-        # Step 4: Fuse multi-view predictions
-        print("  Fusing multi-view predictions...")
+        # Step 4: Fuse multi-view predictions with reference-view weighted voxel voting
+        print(f"  Fusing multi-view predictions (voxel_size={self.voxel_size}m, "
+              f"ref_weight={self.ref_view_weight})...")
         fused = self._fuse_multiview_points(
-            all_points, all_instance_ids, all_classes, all_confs, all_colors
+            all_points, all_instance_ids, all_classes, all_confs, all_colors,
+            all_view_indices=all_view_indices,
+            ref_view_idx=ref_idx,
         )
         
         print(f"✓ Generated panoptic point cloud: {len(fused.points)} points")
@@ -332,21 +356,31 @@ class MultiViewPanopticInference:
         self,
         images: torch.Tensor,
         camera_poses: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         """
-        Get depth predictions from MapAnything.
-        
+        Get depth predictions, confidences, and 3D points from MapAnything.
+
+        MapAnything outputs per-view:
+          - depth_along_ray: [H, W] raw depth (before metric scaling)
+          - metric_scaling_factor: scalar to convert raw → metric depth
+          - pts3d: [H, W, 3] metrically-scaled 3D points in *camera* frame
+          - conf: [H, W] per-pixel confidence in [0, 1]
+
+        Using pts3d directly (instead of re-unprojecting from depth) avoids
+        error accumulation from intrinsic approximations.
+
         Args:
             images: [1, N, 3, H, W]
             camera_poses: [1, N, 4, 4]
-        
+
         Returns:
-            depths: [N, H, W]
-            confidences: [N, H, W]
+            depths: [N, H, W] metric depth per view
+            confidences: [N, H, W] MapAnything confidence per view
+            pts3d_world: [N, H, W, 3] 3D points in world frame (or None)
         """
         B, N, C, H, W = images.shape
         mapanything = self.model.backbone.mapanything
-        
+
         # Prepare views for MapAnything
         views = []
         for v in range(N):
@@ -355,18 +389,21 @@ class MultiViewPanopticInference:
                 'data_norm_type': ['dinov2'] * B,
             }
             views.append(view_dict)
-        
+
         # Run MapAnything forward
         with torch.no_grad():
             outputs = mapanything(views)
-        
-        # Extract depth and confidence
+
+        # Extract depth, confidence, and 3D points
         depths = []
         confidences = []
-        
+        pts3d_list = []
+        has_pts3d = False
+
         for v in range(N):
             pred = outputs[v]
-            
+
+            # --- Depth ---
             if 'depth_along_ray' in pred:
                 depth = pred['depth_along_ray'].squeeze()
                 if 'metric_scaling_factor' in pred:
@@ -375,25 +412,50 @@ class MultiViewPanopticInference:
                         scale = scale.item()
                     depth = depth * scale
             elif 'pts3d' in pred:
-                # Compute depth from 3D points (z-coordinate in camera frame)
                 pts3d = pred['pts3d'].squeeze()  # [H, W, 3]
                 depth = pts3d[..., 2]
             else:
-                # Fallback: uniform depth
                 depth = torch.ones(H, W, device=self.device)
-            
+
             depths.append(depth)
-            
+
+            # --- Confidence ---
             if 'conf' in pred:
                 conf = pred['conf'].squeeze()
             else:
                 conf = torch.ones_like(depth)
             confidences.append(conf)
-        
-        depths = torch.stack(depths, dim=0)  # [N, H, W]
-        confidences = torch.stack(confidences, dim=0)  # [N, H, W]
-        
-        return depths, confidences
+
+            # --- 3D points (camera frame → world frame) ---
+            if 'pts3d' in pred:
+                pts_cam = pred['pts3d'].squeeze()  # [H, W, 3]
+                # pts3d from MapAnything is in camera frame.
+                # Transform to world using camera_poses [1, N, 4, 4]
+                pose = camera_poses[0, v]  # [4, 4]  (c2w)
+                R = pose[:3, :3]  # [3, 3]
+                t = pose[:3, 3]   # [3]
+                pts_flat = pts_cam.reshape(-1, 3)  # [H*W, 3]
+                pts_world_flat = (pts_flat @ R.T) + t.unsqueeze(0)  # [H*W, 3]
+                pts3d_list.append(pts_world_flat.reshape(H, W, 3))
+                has_pts3d = True
+            else:
+                pts3d_list.append(None)
+
+        depths = torch.stack(depths, dim=0)           # [N, H, W]
+        confidences = torch.stack(confidences, dim=0) # [N, H, W]
+
+        if has_pts3d and all(p is not None for p in pts3d_list):
+            pts3d_world = torch.stack(pts3d_list, dim=0)  # [N, H, W, 3]
+        else:
+            pts3d_world = None
+
+        print(f"  MapAnything outputs:")
+        print(f"    Depth  range: {depths.min():.3f} – {depths.max():.3f} m")
+        print(f"    Conf   range: {confidences.min():.3f} – {confidences.max():.3f}")
+        if pts3d_world is not None:
+            print(f"    pts3d  shape: {pts3d_world.shape}")
+
+        return depths, confidences, pts3d_world
     
     def _prepare_features_for_view(
         self,
@@ -555,91 +617,123 @@ class MultiViewPanopticInference:
         pose: torch.Tensor,           # [4, 4]
         intrinsics: torch.Tensor,     # [3, 3]
         image: torch.Tensor,          # [3, H, W]
+        pts3d_world: Optional[torch.Tensor] = None,  # [H, W, 3] from MapAnything
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
-        Lift 2D predictions to 3D points.
-        
-        Key insight: Each query index IS the instance ID.
-        Query #K in all views → Instance #K in 3D.
+        Lift 2D panoptic predictions to 3D points.
+
+        Each query index IS the instance ID — Query #K in all views maps to
+        Instance #K in 3D (guaranteed by query propagation).
+
+        3D point sources (in order of preference):
+          1. pts3d_world: Direct MapAnything output (most accurate, already
+             metrically scaled and in world frame).
+          2. Depth unprojection: Classic pinhole unproject with c2w transform.
+
+        The confidence used for each point is the *product* of:
+          - MapAnything depth/reconstruction confidence (geometric quality)
+          - Mask2Former prediction score (semantic quality)
+        This combined confidence drives voxel voting downstream.
+
+        Args:
+            pred_masks:   [Q, H', W']  mask probabilities (0-1, after sigmoid)
+            pred_classes: [Q]          predicted class per query
+            pred_scores:  [Q]          class probability per query
+            depth:        [H, W]       metric depth
+            confidence:   [H, W]       MapAnything confidence map
+            pose:         [4, 4]       camera-to-world
+            intrinsics:   [3, 3]       camera intrinsics
+            image:        [3, H, W]    RGB image (0-255)
+            pts3d_world:  [H, W, 3]    Optional world-frame 3D points from
+                                       MapAnything (preferred over depth unproject)
+
+        Returns:
+            points:    [P, 3]  world-frame 3D coordinates
+            inst_ids:  [P]     instance IDs (= query indices)
+            classes:   [P]     semantic class IDs
+            confs:     [P]     combined confidence (geometric × semantic)
+            colors:    [P, 3]  RGB colours in [0, 1]
         """
         Q = pred_masks.shape[0]
         H, W = depth.shape
         device = pred_masks.device
-        
-        # Resize masks to match depth resolution
+
+        # ---- Resize masks to depth resolution ----
         if pred_masks.shape[-2:] != (H, W):
             pred_masks = F.interpolate(
                 pred_masks.unsqueeze(0),
                 size=(H, W),
                 mode='bilinear',
-                align_corners=False
+                align_corners=False,
             )[0]
-        
-        # Create pixel grid
-        v_coords, u_coords = torch.meshgrid(
-            torch.arange(H, device=device, dtype=torch.float32),
-            torch.arange(W, device=device, dtype=torch.float32),
-            indexing='ij'
-        )
-        
-        # Valid depth mask
+
+        # ---- Determine valid-depth mask ----
         valid_depth = (depth > 0) & (confidence > self.confidence_threshold)
-        
-        # Debug stats
+
         if valid_depth.sum() == 0:
             print(f"[DEBUG] No valid depth points!")
-            print(f"  Depth range: {depth.min():.3f} - {depth.max():.3f}")
-            print(f"  Conf range: {confidence.min():.3f} - {confidence.max():.3f} (Threshold: {self.confidence_threshold})")
-            print(f"  Depth > 0 count: {(depth > 0).sum()}")
-            print(f"  Conf > th count: {(confidence > self.confidence_threshold).sum()}")
-        
-        # Unproject to 3D
-        fx, fy = intrinsics[0, 0], intrinsics[1, 1]
-        cx, cy = intrinsics[0, 2], intrinsics[1, 2]
-        
-        x_cam = (u_coords - cx) * depth / fx
-        y_cam = (v_coords - cy) * depth / fy
-        z_cam = depth
-        
-        # Stack to [H, W, 4] homogeneous
-        pts_cam = torch.stack([x_cam, y_cam, z_cam, torch.ones_like(z_cam)], dim=-1)
-        
-        # Transform to world [H, W, 4]
-        pts_world = torch.einsum('hwi,ji->hwj', pts_cam, pose)
-        pts_world = pts_world[..., :3]  # [H, W, 3]
-        
-        # Assign each pixel to its best query (instance)
-        # [Q, H, W] -> find argmax query per pixel
-        weighted_masks = pred_masks * pred_scores.view(Q, 1, 1)
-        instance_ids = weighted_masks.argmax(dim=0)  # [H, W] - query index = instance ID
-        
-        # Get semantic class for each pixel (from assigned query)
-        semantic_classes = pred_classes[instance_ids]  # [H, W]
-        
-        # Get confidence for each pixel
+            print(f"  Depth range: {depth.min():.3f} – {depth.max():.3f}")
+            print(f"  Conf range:  {confidence.min():.3f} – {confidence.max():.3f} "
+                  f"(threshold: {self.confidence_threshold})")
+            return (np.zeros((0, 3)), np.zeros(0, dtype=np.int64),
+                    np.zeros(0, dtype=np.int64), np.zeros(0),
+                    np.zeros((0, 3)))
+
+        # ---- 3D points: prefer MapAnything pts3d, fallback to unproject ----
+        if pts3d_world is not None:
+            # MapAnything already computed metrically-scaled world-frame points.
+            # This is more accurate than re-unprojecting from depth because
+            # MapAnything jointly optimises geometry across views.
+            pts_world = pts3d_world  # [H, W, 3]
+        else:
+            # Classic depth unprojection + c2w transform
+            v_coords, u_coords = torch.meshgrid(
+                torch.arange(H, device=device, dtype=torch.float32),
+                torch.arange(W, device=device, dtype=torch.float32),
+                indexing='ij',
+            )
+            fx, fy = intrinsics[0, 0], intrinsics[1, 1]
+            cx, cy = intrinsics[0, 2], intrinsics[1, 2]
+
+            x_cam = (u_coords - cx) * depth / fx
+            y_cam = (v_coords - cy) * depth / fy
+            z_cam = depth
+            pts_cam = torch.stack(
+                [x_cam, y_cam, z_cam, torch.ones_like(z_cam)], dim=-1,
+            )  # [H, W, 4]
+            pts_world = torch.einsum('hwi,ji->hwj', pts_cam, pose)[..., :3]
+
+        # ---- Per-pixel panoptic assignment ----
+        # Weighted mask = mask_prob × class_score → highest wins per pixel
+        weighted_masks = pred_masks * pred_scores.view(Q, 1, 1)  # [Q, H, W]
+        instance_ids = weighted_masks.argmax(dim=0)               # [H, W]
+        semantic_classes = pred_classes[instance_ids]              # [H, W]
+
+        # Combined confidence: (MapAnything conf) × (best mask score)
         max_mask_score = weighted_masks.max(dim=0)[0]  # [H, W]
-        point_confs = max_mask_score * confidence  # Combine mask and depth confidence
-        
-        # Filter valid points
+        point_confs = max_mask_score * confidence       # geometric × semantic
+
+        # ---- Filter ----
         valid = valid_depth & (max_mask_score > self.mask_threshold)
 
         if valid.sum() == 0 and valid_depth.sum() > 0:
-            print(f"[DEBUG] Depth is valid but Masks filtered everything!")
-            print(f"  Mask score range: {max_mask_score.min():.3f} - {max_mask_score.max():.3f} (Threshold: {self.mask_threshold})")
-            print(f"  Max valid mask score: {max_mask_score[valid_depth].max() if valid_depth.any() else 'N/A'}")
-        
-        # Extract valid points
-        points = pts_world[valid].cpu().numpy()           # [P, 3]
-        inst_ids = instance_ids[valid].cpu().numpy()      # [P]
+            print(f"[DEBUG] Depth valid but masks filtered everything!")
+            print(f"  Mask score range: {max_mask_score.min():.3f} – "
+                  f"{max_mask_score.max():.3f} (threshold: {self.mask_threshold})")
+
+        # ---- Extract valid points ----
+        valid_np = valid.cpu().numpy()
+        points = pts_world[valid].cpu().numpy()          # [P, 3]
+        inst_ids = instance_ids[valid].cpu().numpy()     # [P]
         classes = semantic_classes[valid].cpu().numpy()   # [P]
         confs = point_confs[valid].cpu().numpy()          # [P]
-        
-        # Get colors (image already in [0, 1] range from preprocessing)
+
+        # Colours
         img_np = image.permute(1, 2, 0).cpu().numpy()  # [H, W, 3]
         if img_np.max() > 1.0:
             img_np = img_np / 255.0
-        colors = img_np.reshape(H, W, 3)[valid.cpu().numpy()]  # [P, 3]
-        
+        colors = img_np.reshape(H, W, 3)[valid_np]  # [P, 3]
+
         return points, inst_ids, classes, confs, colors
     
     def _fuse_multiview_points(
@@ -649,12 +743,30 @@ class MultiViewPanopticInference:
         all_classes: List[np.ndarray],
         all_confs: List[np.ndarray],
         all_colors: List[np.ndarray],
+        all_view_indices: Optional[List[np.ndarray]] = None,
+        ref_view_idx: int = 0,
     ) -> PanopticPointCloud:
         """
-        Fuse points from multiple views into unified point cloud.
-        
-        Key: Instance IDs are ALREADY consistent because we used
-        query propagation. Query #K in View A = Query #K in View B.
+        Fuse points from multiple views into a unified panoptic point cloud.
+
+        Instance IDs are ALREADY consistent across views because query
+        propagation re-uses the reference queries: Query #K in every view
+        corresponds to the same physical entity.
+
+        Voxel voting resolves conflicts when the same physical location is
+        observed by multiple views with different predictions.  The reference
+        view receives extra weight (``self.ref_view_weight``) because its
+        queries are learned (not propagated) and therefore typically more
+        reliable.
+
+        Args:
+            all_points:       Per-view lists of [P_v, 3] world-frame points.
+            all_instance_ids: Per-view lists of [P_v] instance IDs.
+            all_classes:      Per-view lists of [P_v] class IDs.
+            all_confs:        Per-view lists of [P_v] confidence values.
+            all_colors:       Per-view lists of [P_v, 3] RGB colours.
+            all_view_indices: Per-view lists of [P_v] view-index tags.
+            ref_view_idx:     Index of the reference view (default 0).
         """
         if len(all_points) == 0:
             return PanopticPointCloud(
@@ -664,20 +776,27 @@ class MultiViewPanopticInference:
                 confidences=np.zeros(0),
                 colors=np.zeros((0, 3)),
             )
-        
-        # Concatenate all points
+
+        # Concatenate all views
         points = np.concatenate(all_points, axis=0)
         instance_ids = np.concatenate(all_instance_ids, axis=0)
         classes = np.concatenate(all_classes, axis=0)
         confs = np.concatenate(all_confs, axis=0)
         colors = np.concatenate(all_colors, axis=0)
-        
+
+        if all_view_indices is not None and len(all_view_indices) > 0:
+            view_indices = np.concatenate(all_view_indices, axis=0)
+        else:
+            view_indices = None
+
         # Voxelize to remove duplicates and vote on labels
         if self.voxel_size > 0 and len(points) > 0:
             points, instance_ids, classes, confs, colors = self._voxelize_and_vote(
-                points, instance_ids, classes, confs, colors
+                points, instance_ids, classes, confs, colors,
+                view_indices=view_indices,
+                ref_view_idx=ref_view_idx,
             )
-        
+
         return PanopticPointCloud(
             points=points,
             instance_ids=instance_ids.astype(np.int32),
@@ -693,91 +812,150 @@ class MultiViewPanopticInference:
         classes: np.ndarray,
         confs: np.ndarray,
         colors: np.ndarray,
+        view_indices: Optional[np.ndarray] = None,
+        ref_view_idx: int = 0,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
-        Voxelize point cloud and vote on instance/class labels.
-        
-        For overlapping points from different views, we:
-        1. Group by voxel
-        2. Average positions
-        3. Vote on instance ID (weighted by confidence)
-        4. Vote on class (weighted by confidence)
+        Voxelize the fused point cloud and vote on labels.
+
+        Algorithm
+        ---------
+        1. ``voxel_indices = floor(points / voxel_size)``
+        2. Group points by voxel.
+        3. For each voxel:
+           - **Position**: confidence-weighted mean of constituent points.
+           - **Colour**:   confidence-weighted mean of RGB values.
+           - **Instance ID**: majority vote weighted by ``vote_weight``.
+           - **Class ID**:    majority vote weighted by ``vote_weight``.
+           - **Confidence**:  max confidence among constituents.
+
+        ``vote_weight`` for each point equals its combined confidence
+        (MapAnything geometric conf × Mask2Former semantic score), multiplied
+        by ``self.ref_view_weight`` if the point originated from the
+        reference view.  This gives the reference view — whose queries are
+        *learned* rather than propagated — a controlled advantage during
+        label conflict resolution.
+
+        Complexity: O(P log P) due to the sort-based grouping, which is
+        dramatically faster than the previous O(P × V) per-voxel loop.
+
+        Parameters
+        ----------
+        points        : [P, 3]  world-frame coordinates
+        instance_ids  : [P]     instance (query) ID per point
+        classes       : [P]     semantic class per point
+        confs         : [P]     combined confidence per point
+        colors        : [P, 3]  RGB colours in [0, 1]
+        view_indices  : [P]     source view index per point (or None)
+        ref_view_idx  : int     which view index is the reference
         """
         if len(points) == 0:
             return points, instance_ids, classes, confs, colors
-        
-        # Compute voxel indices
-        voxel_indices = np.floor(points / self.voxel_size).astype(np.int64)
-        
-        # Shift to positive
-        voxel_min = voxel_indices.min(axis=0)
-        voxel_indices = voxel_indices - voxel_min
-        voxel_max = voxel_indices.max(axis=0) + 1
-        
-        # Create unique voxel keys
+
+        # ----- Compute vote weights (confidence × ref boost) -----
+        vote_weights = confs.copy()
+        if view_indices is not None and self.ref_view_weight != 1.0:
+            ref_mask = (view_indices == ref_view_idx)
+            vote_weights[ref_mask] *= self.ref_view_weight
+            n_ref = ref_mask.sum()
+            n_tgt = len(points) - n_ref
+            print(f"    Voxel voting: {n_ref} ref pts (×{self.ref_view_weight}), "
+                  f"{n_tgt} target pts")
+
+        # ----- Assign each point to a voxel -----
+        voxel_ijk = np.floor(points / self.voxel_size).astype(np.int64)
+
+        # Shift to non-negative indices
+        voxel_min = voxel_ijk.min(axis=0)
+        voxel_ijk = voxel_ijk - voxel_min
+        voxel_max = voxel_ijk.max(axis=0) + 1
+
+        # Flatten to scalar key: i * (Ny * Nz) + j * Nz + k
         voxel_keys = (
-            voxel_indices[:, 0] * voxel_max[1] * voxel_max[2] +
-            voxel_indices[:, 1] * voxel_max[2] +
-            voxel_indices[:, 2]
+            voxel_ijk[:, 0] * (voxel_max[1] * voxel_max[2])
+            + voxel_ijk[:, 1] * voxel_max[2]
+            + voxel_ijk[:, 2]
         )
-        
-        # Find unique voxels
-        unique_keys, inverse_indices = np.unique(voxel_keys, return_inverse=True)
+
+        # Unique voxels and inverse mapping
+        unique_keys, inverse = np.unique(voxel_keys, return_inverse=True)
         num_voxels = len(unique_keys)
-        
-        # Aggregate per voxel using vectorized operations
+
+        # ----- Vectorised position & colour averaging -----
+        # weighted_sum / weight_sum  via np.bincount
+        weight_sum = np.bincount(inverse, weights=vote_weights,
+                                 minlength=num_voxels)
+        weight_sum_safe = np.maximum(weight_sum, 1e-8)
+
         fused_points = np.zeros((num_voxels, 3))
-        fused_instance_ids = np.zeros(num_voxels, dtype=np.int64)
-        fused_classes = np.zeros(num_voxels, dtype=np.int64)
-        fused_confs = np.zeros(num_voxels)
         fused_colors = np.zeros((num_voxels, 3))
-        
-        # Use np.bincount for efficient aggregation
-        for dim in range(3):
-            weighted_sum = np.bincount(inverse_indices, weights=points[:, dim] * confs, minlength=num_voxels)
-            weight_sum = np.bincount(inverse_indices, weights=confs, minlength=num_voxels)
-            weight_sum = np.maximum(weight_sum, 1e-8)  # Avoid division by zero
-            fused_points[:, dim] = weighted_sum / weight_sum
-        
-        for dim in range(3):
-            weighted_sum = np.bincount(inverse_indices, weights=colors[:, dim] * confs, minlength=num_voxels)
-            weight_sum = np.bincount(inverse_indices, weights=confs, minlength=num_voxels)
-            weight_sum = np.maximum(weight_sum, 1e-8)
-            fused_colors[:, dim] = weighted_sum / weight_sum
-        
-        # For instance and class, take the one with highest total confidence
-        for v_idx in range(num_voxels):
-            mask = inverse_indices == v_idx
-            voxel_confs = confs[mask]
-            
-            # Instance voting
-            voxel_instances = instance_ids[mask]
-            unique_instances = np.unique(voxel_instances)
-            best_instance = unique_instances[0]
-            best_conf = 0
-            for inst in unique_instances:
-                inst_conf = voxel_confs[voxel_instances == inst].sum()
-                if inst_conf > best_conf:
-                    best_conf = inst_conf
-                    best_instance = inst
-            fused_instance_ids[v_idx] = best_instance
-            
-            # Class voting
-            voxel_classes = classes[mask]
-            unique_classes_v = np.unique(voxel_classes)
-            best_class = unique_classes_v[0]
-            best_conf = 0
-            for cls in unique_classes_v:
-                cls_conf = voxel_confs[voxel_classes == cls].sum()
-                if cls_conf > best_conf:
-                    best_conf = cls_conf
-                    best_class = cls
-            fused_classes[v_idx] = best_class
-            
-            # Max confidence
-            fused_confs[v_idx] = voxel_confs.max()
-        
-        return fused_points, fused_instance_ids, fused_classes, fused_confs, fused_colors
+        for d in range(3):
+            fused_points[:, d] = (
+                np.bincount(inverse, weights=points[:, d] * vote_weights,
+                            minlength=num_voxels)
+                / weight_sum_safe
+            )
+            fused_colors[:, d] = (
+                np.bincount(inverse, weights=colors[:, d] * vote_weights,
+                            minlength=num_voxels)
+                / weight_sum_safe
+            )
+
+        # ----- Fast-path label voting -----
+        # For voxels where ALL points agree, we can skip the expensive loop.
+        # Sort by voxel key to enable grouped processing.
+        sort_idx = np.argsort(inverse)
+        sorted_inverse = inverse[sort_idx]
+        sorted_instances = instance_ids[sort_idx]
+        sorted_classes = classes[sort_idx]
+        sorted_weights = vote_weights[sort_idx]
+        sorted_confs = confs[sort_idx]
+
+        # Find group boundaries (start index of each voxel)
+        # np.searchsorted on the unique keys gives us boundaries.
+        boundaries = np.searchsorted(sorted_inverse, np.arange(num_voxels))
+        boundaries = np.append(boundaries, len(sorted_inverse))
+
+        fused_instance_ids = np.zeros(num_voxels, dtype=np.int64)
+        fused_classes_arr = np.zeros(num_voxels, dtype=np.int64)
+        fused_confs = np.zeros(num_voxels)
+
+        # Single-point voxels (very common — ~60-80% of voxels)
+        counts = np.diff(boundaries)
+        single_mask = counts == 1
+        single_idxs = np.where(single_mask)[0]
+        if len(single_idxs) > 0:
+            src = boundaries[single_idxs]
+            fused_instance_ids[single_idxs] = sorted_instances[src]
+            fused_classes_arr[single_idxs] = sorted_classes[src]
+            fused_confs[single_idxs] = sorted_confs[src]
+
+        # Multi-point voxels: iterate only over these (much smaller set)
+        multi_idxs = np.where(~single_mask)[0]
+        for v_idx in multi_idxs:
+            lo, hi = boundaries[v_idx], boundaries[v_idx + 1]
+            v_instances = sorted_instances[lo:hi]
+            v_classes = sorted_classes[lo:hi]
+            v_weights = sorted_weights[lo:hi]
+            v_confs = sorted_confs[lo:hi]
+
+            # Instance vote: sum of vote_weights per unique instance
+            u_inst, inv_inst = np.unique(v_instances, return_inverse=True)
+            inst_votes = np.bincount(inv_inst, weights=v_weights)
+            fused_instance_ids[v_idx] = u_inst[inst_votes.argmax()]
+
+            # Class vote: sum of vote_weights per unique class
+            u_cls, inv_cls = np.unique(v_classes, return_inverse=True)
+            cls_votes = np.bincount(inv_cls, weights=v_weights)
+            fused_classes_arr[v_idx] = u_cls[cls_votes.argmax()]
+
+            # Max raw confidence in the voxel
+            fused_confs[v_idx] = v_confs.max()
+
+        print(f"    Voxelised: {len(points)} pts → {num_voxels} voxels "
+              f"({len(single_idxs)} single, {len(multi_idxs)} multi)")
+
+        return fused_points, fused_instance_ids, fused_classes_arr, fused_confs, fused_colors
 
 
 # ============================================================
@@ -1871,6 +2049,264 @@ def visualize_panoptic_pointcloud(
     print(f"  [VIZ] Saved point cloud visualization to {output_path}")
 
 
+def visualize_rgb_vs_semantic_pointcloud(
+    pcd: PanopticPointCloud,
+    output_path: str,
+    class_names: Optional[Dict[int, str]] = None,
+    max_points: int = 50000,
+    point_size: float = 1.0,
+):
+    """
+    Side-by-side RGB vs Semantic point cloud comparison (matches single-view output).
+
+    Produces a 2-panel figure:
+      Left:  RGB-colored point cloud (original MapAnything reconstruction colours)
+      Right: Semantic-colored point cloud (class-based colouring + legend)
+
+    This directly mirrors ``create_point_cloud_comparison()`` from the
+    single-view script, showing the segmentation projected onto the
+    MapAnything 3D reconstructed output.
+    """
+    if len(pcd.points) == 0:
+        print(f"  [VIZ] Empty point cloud, skipping RGB vs Semantic viz")
+        return
+
+    # Downsample
+    P = len(pcd.points)
+    if P > max_points:
+        idx = np.random.choice(P, max_points, replace=False)
+        pts = pcd.points[idx]
+        rgb_colors = pcd.colors[idx] if pcd.colors is not None else np.full((max_points, 3), 0.5)
+        sem_classes = pcd.semantic_classes[idx]
+    else:
+        pts = pcd.points
+        rgb_colors = pcd.colors if pcd.colors is not None else np.full((P, 3), 0.5)
+        sem_classes = pcd.semantic_classes
+
+    # Semantic colormap
+    unique_classes = np.unique(sem_classes)
+    max_cls = max(unique_classes.max() + 1, 1) if len(unique_classes) > 0 else 1
+    class_cmap = _generate_class_colormap(int(max_cls))
+    sem_colors = class_cmap[np.clip(sem_classes, 0, len(class_cmap) - 1)]
+
+    fig = plt.figure(figsize=(24, 10))
+
+    # Equal-aspect helper
+    max_range = (pts.max(axis=0) - pts.min(axis=0)).max() / 2
+    mid = (pts.max(axis=0) + pts.min(axis=0)) / 2
+
+    # ---- Left: RGB Point Cloud ----
+    ax1 = fig.add_subplot(121, projection='3d')
+    ax1.scatter(pts[:, 0], pts[:, 1], pts[:, 2],
+                c=rgb_colors, s=point_size, alpha=0.6, edgecolors='none')
+    ax1.set_xlabel('X (m)', fontsize=12)
+    ax1.set_ylabel('Y (m)', fontsize=12)
+    ax1.set_zlabel('Z (m)', fontsize=12)
+    ax1.set_title('RGB Point Cloud\n(MapAnything 3D + Image Colors)',
+                  fontsize=14, fontweight='bold')
+    ax1.view_init(elev=30, azim=45)
+    ax1.set_xlim(mid[0] - max_range, mid[0] + max_range)
+    ax1.set_ylim(mid[1] - max_range, mid[1] + max_range)
+    ax1.set_zlim(mid[2] - max_range, mid[2] + max_range)
+
+    # ---- Right: Semantic Point Cloud ----
+    ax2 = fig.add_subplot(122, projection='3d')
+    ax2.scatter(pts[:, 0], pts[:, 1], pts[:, 2],
+                c=sem_colors, s=point_size, alpha=0.6, edgecolors='none')
+    ax2.set_xlabel('X (m)', fontsize=12)
+    ax2.set_ylabel('Y (m)', fontsize=12)
+    ax2.set_zlabel('Z (m)', fontsize=12)
+    ax2.set_title('Semantic Segmentation Point Cloud\n(Colored by Predicted Class)',
+                  fontsize=14, fontweight='bold')
+    ax2.view_init(elev=30, azim=45)
+    ax2.set_xlim(mid[0] - max_range, mid[0] + max_range)
+    ax2.set_ylim(mid[1] - max_range, mid[1] + max_range)
+    ax2.set_zlim(mid[2] - max_range, mid[2] + max_range)
+
+    # ---- Class legend on semantic panel ----
+    if class_names and len(unique_classes) <= 50:
+        legend_elements = []
+        for cls_id in sorted(unique_classes):
+            name = class_names.get(int(cls_id), f"class_{cls_id}")
+            color = class_cmap[min(int(cls_id), len(class_cmap) - 1)]
+            legend_elements.append(
+                plt.Line2D([0], [0], marker='o', color='w',
+                           markerfacecolor=color, markersize=10,
+                           label=name))
+        ax2.legend(handles=legend_elements, loc='upper left',
+                   bbox_to_anchor=(1.05, 1), fontsize=9, framealpha=0.9)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight', facecolor='white')
+    plt.close()
+    print(f"  [VIZ] Saved RGB vs Semantic comparison to {output_path}")
+
+
+def visualize_blended_pointcloud(
+    pcd: PanopticPointCloud,
+    output_path: str,
+    class_names: Optional[Dict[int, str]] = None,
+    max_points: int = 50000,
+    point_size: float = 1.0,
+    alpha: float = 0.5,
+    views: Optional[List[Tuple[str, float, float]]] = None,
+):
+    """
+    Blended RGB+Semantic overlay on the MapAnything 3D reconstruction.
+
+    Produces a multi-viewpoint figure where each point's colour is:
+        ``blended = (1 - alpha) * RGB + alpha * semantic_color``
+
+    This is the multi-view equivalent of ``create_blended_point_cloud_overlay()``
+    from the single-view script and directly shows **segmentation projected
+    onto the MapAnything 3D output**.
+
+    Args:
+        pcd:        PanopticPointCloud with both ``.colors`` and ``.semantic_classes``.
+        output_path: Where to save the PNG.
+        class_names: Optional class-id → name mapping.
+        max_points:  Downsample limit.
+        point_size:  Scatter marker size.
+        alpha:       Blend factor (0 = pure RGB, 1 = pure semantic).
+        views:       List of (title, elevation, azimuth) tuples.
+    """
+    if len(pcd.points) == 0:
+        print(f"  [VIZ] Empty point cloud, skipping blended viz")
+        return
+
+    if views is None:
+        views = [
+            ("Front View", 0, 0),
+            ("Top View", 90, 0),
+            ("Side View", 0, 90),
+            ("Angled View", 30, 45),
+        ]
+
+    # Downsample
+    P = len(pcd.points)
+    if P > max_points:
+        idx = np.random.choice(P, max_points, replace=False)
+        pts = pcd.points[idx]
+        rgb_colors = pcd.colors[idx] if pcd.colors is not None else np.full((max_points, 3), 0.5)
+        sem_classes = pcd.semantic_classes[idx]
+    else:
+        pts = pcd.points
+        rgb_colors = pcd.colors if pcd.colors is not None else np.full((P, 3), 0.5)
+        sem_classes = pcd.semantic_classes
+
+    # Semantic colormap
+    unique_classes = np.unique(sem_classes)
+    max_cls = max(unique_classes.max() + 1, 1) if len(unique_classes) > 0 else 1
+    class_cmap = _generate_class_colormap(int(max_cls))
+    sem_colors = class_cmap[np.clip(sem_classes, 0, len(class_cmap) - 1)]
+
+    # Blend
+    blended_colors = (1 - alpha) * rgb_colors + alpha * sem_colors
+    blended_colors = np.clip(blended_colors, 0.0, 1.0)
+
+    # Equal-aspect helper
+    max_range = (pts.max(axis=0) - pts.min(axis=0)).max() / 2
+    mid = (pts.max(axis=0) + pts.min(axis=0)) / 2
+
+    n_views = len(views)
+    fig = plt.figure(figsize=(20, 5 * ((n_views + 1) // 2)))
+    fig.suptitle(f"Blended RGB + Semantic Overlay (\u03b1={alpha})",
+                 fontsize=16, fontweight='bold', y=0.98)
+
+    # Build legend
+    legend_elements = []
+    if class_names and len(unique_classes) <= 50:
+        for cls_id in sorted(unique_classes):
+            name = class_names.get(int(cls_id), f"class_{cls_id}")
+            sem_c = class_cmap[min(int(cls_id), len(class_cmap) - 1)]
+            # Show blended colour in legend (assume avg RGB ≈ grey)
+            blended_c = (1 - alpha) * np.array([0.5, 0.5, 0.5]) + alpha * sem_c
+            legend_elements.append(
+                plt.Line2D([0], [0], marker='o', color='w',
+                           markerfacecolor=blended_c, markersize=10,
+                           label=name))
+
+    ncols = min(2, n_views)
+    nrows = (n_views + ncols - 1) // ncols
+    for i, (title, elev, azim) in enumerate(views):
+        ax = fig.add_subplot(nrows, ncols, i + 1, projection='3d')
+        ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2],
+                   c=blended_colors, s=point_size, alpha=0.6, edgecolors='none')
+        ax.set_xlabel('X (m)')
+        ax.set_ylabel('Y (m)')
+        ax.set_zlabel('Z (m)')
+        ax.set_title(f"{title}\n(RGB + Semantic, \u03b1={alpha})",
+                     fontsize=12, fontweight='bold')
+        ax.view_init(elev=elev, azim=azim)
+        ax.set_xlim(mid[0] - max_range, mid[0] + max_range)
+        ax.set_ylim(mid[1] - max_range, mid[1] + max_range)
+        ax.set_zlim(mid[2] - max_range, mid[2] + max_range)
+
+        # Attach legend to first subplot only
+        if i == 0 and legend_elements:
+            ax.legend(handles=legend_elements, loc='upper left',
+                      bbox_to_anchor=(-0.1, 1), fontsize=8,
+                      framealpha=0.9, title="Classes")
+
+    plt.tight_layout(rect=[0, 0.02, 1, 0.96])
+    plt.savefig(output_path, dpi=150, bbox_inches='tight', facecolor='white')
+    plt.close()
+    print(f"  [VIZ] Saved blended overlay to {output_path}")
+
+
+def save_multiple_ply(
+    pcd: PanopticPointCloud,
+    output_dir: str,
+    scene_name: str,
+    class_names: Optional[Dict[int, str]] = None,
+    blend_alpha: float = 0.5,
+):
+    """
+    Save RGB, semantic, and blended PLY files (matching single-view output).
+
+    Single-view saves:
+      - reconstruction_rgb.ply      (RGB colours from image)
+      - reconstruction_semantic.ply  (colours = semantic class colour)
+      - reconstruction_blended.ply   (alpha-blended RGB + semantic)
+
+    This function does the same for multi-view fused point clouds.
+    All three PLY files use the *same geometry* (MapAnything 3D reconstruction
+    fused via voxel voting) — only the vertex colours differ.
+    """
+    out = Path(output_dir)
+
+    # Semantic colormap
+    max_cls = max(pcd.semantic_classes.max() + 1, 1)
+    class_cmap_255 = (_generate_class_colormap(int(max_cls)) * 255).astype(np.uint8)
+    class_cmap_01 = _generate_class_colormap(int(max_cls))
+
+    rgb_colors = pcd.colors if pcd.colors is not None else np.full((len(pcd.points), 3), 0.5)
+    sem_colors_01 = class_cmap_01[np.clip(pcd.semantic_classes, 0, len(class_cmap_01) - 1)]
+
+    # ---- 1. RGB PLY ----
+    rgb_ply = out / f"{scene_name}_rgb.ply"
+    pcd.save_ply(str(rgb_ply), use_semantic_colors=False)
+    print(f"  ✓ RGB point cloud saved: {rgb_ply}")
+
+    # ---- 2. Semantic PLY ----
+    sem_ply = out / f"{scene_name}_semantic.ply"
+    pcd.save_ply(str(sem_ply), use_semantic_colors=True, class_colors=class_cmap_255)
+    print(f"  ✓ Semantic point cloud saved: {sem_ply}")
+
+    # ---- 3. Blended PLY ----
+    blended_ply = out / f"{scene_name}_blended.ply"
+    blended_colors = (1 - blend_alpha) * rgb_colors + blend_alpha * sem_colors_01
+    blended_colors = np.clip(blended_colors, 0.0, 1.0)
+    # Temporarily swap colours for saving, then restore
+    orig_colors = pcd.colors
+    pcd.colors = blended_colors
+    pcd.save_ply(str(blended_ply), use_semantic_colors=False)
+    pcd.colors = orig_colors
+    print(f"  ✓ Blended point cloud saved: {blended_ply}  (α={blend_alpha})")
+
+    return str(rgb_ply), str(sem_ply), str(blended_ply)
+
+
 def visualize_prediction_vs_gt(
     pred_pcd: PanopticPointCloud,
     gt_pcd: PanopticPointCloud,
@@ -2386,6 +2822,9 @@ def run_multiview_inference(
     mask_threshold: float = 0.5,
     min_distance: float = 0.3,
     max_distance: float = 2.0,
+    voxel_size: float = 0.02,
+    ref_view_weight: float = 1.5,
+    confidence_threshold: float = 0.5,
 ):
     """Run inference on a scene with optional visualization and GT comparison.
     
@@ -2399,6 +2838,11 @@ def run_multiview_inference(
         mask_threshold: Threshold for binary mask prediction (lower=more points)
         min_distance: Minimum camera distance for overlap-aware view selection
         max_distance: Maximum camera distance for overlap-aware view selection
+        voxel_size: Voxel grid size in metres for deduplication/voting (default 2cm)
+        ref_view_weight: Extra multiplicative weight for reference-view points
+            during voxel voting. Reference view uses learned queries, so its
+            predictions are typically more reliable. Set 1.0 to disable.
+        confidence_threshold: Minimum MapAnything confidence to include a point
     """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -2422,41 +2866,67 @@ def run_multiview_inference(
             gt_depths = gt_depths.squeeze(1)
         print("Loaded ground truth depth maps.")
     
-    inference = MultiViewPanopticInference(model, mask_threshold=mask_threshold)
+    inference = MultiViewPanopticInference(
+        model,
+        mask_threshold=mask_threshold,
+        voxel_size=voxel_size,
+        ref_view_weight=ref_view_weight,
+        confidence_threshold=confidence_threshold,
+    )
     
     # Run
     print(f"Running inference (mask_threshold={mask_threshold})...")
     # Pass depth to inference
     pcd, per_view_preds = inference(images, poses, intrinsics, depths=gt_depths)
     
-    # Save PLY
+    # ── Save PLY files (RGB, Semantic, Blended — matching single-view output) ──
     scene_name = Path(scene_dir).name
-    ply_path = output_path / f"{scene_name}.ply"
-    print(f"Saving to {ply_path}...")
-    pcd.save_ply(str(ply_path), use_semantic_colors=True)
-    
+    print(f"\n=== Saving Point Cloud PLY Files ===")
+
+    # Load class names early (needed for PLY + viz)
+    metadata_path = Path(scene_dir).parent.parent / "metadata" / "semantic_classes.txt"
+    class_names = {}
+    if metadata_path.exists():
+        with open(metadata_path, 'r') as f:
+            for idx, line in enumerate(f):
+                class_names[idx] = line.strip()
+        print(f"  Loaded {len(class_names)} class names from {metadata_path}")
+
+    # Save 3 PLY variants: RGB, Semantic, Blended (same geometry, different colours)
+    rgb_ply, sem_ply, blend_ply = save_multiple_ply(
+        pcd, str(output_path), scene_name,
+        class_names=class_names,
+        blend_alpha=0.5,
+    )
+
     # ── Visualization ──
     if visualize:
         print("\n=== Generating Visualizations ===")
-        
-        # Load class names for legends
-        metadata_path = Path(scene_dir).parent.parent / "metadata" / "semantic_classes.txt"
-        class_names = {}
-        if metadata_path.exists():
-            with open(metadata_path, 'r') as f:
-                for idx, line in enumerate(f):
-                    class_names[idx] = line.strip()
-            print(f"  Loaded {len(class_names)} class names from {metadata_path}")
-        
-        # 1. Prediction-only 3D point cloud visualization (multi-angle)
+
+        # 1. Multi-angle panoptic visualization (RGB / Semantic / Instance panels)
         viz_pred_path = output_path / f"{scene_name}_pred_3d.png"
         visualize_panoptic_pointcloud(
             pcd, str(viz_pred_path),
             title=f"Predicted Panoptic Point Cloud: {scene_name}",
             class_names=class_names,
         )
-        
-        # 2. Load GT point cloud for comparison (if panoptic_dir provided)
+
+        # 2. RGB vs Semantic side-by-side (matches single-view pointcloud_rgb_vs_semantic.png)
+        viz_rgb_sem_path = output_path / f"{scene_name}_rgb_vs_semantic.png"
+        visualize_rgb_vs_semantic_pointcloud(
+            pcd, str(viz_rgb_sem_path),
+            class_names=class_names,
+        )
+
+        # 3. Blended RGB+Semantic overlay from 4 viewpoints (matches single-view pointcloud_blended_views.png)
+        viz_blend_path = output_path / f"{scene_name}_blended_views.png"
+        visualize_blended_pointcloud(
+            pcd, str(viz_blend_path),
+            class_names=class_names,
+            alpha=0.5,
+        )
+
+        # 4. Load GT point cloud for comparison (if panoptic_dir provided)
         gt_pcd = None
         if panoptic_dir:
             print(f"\n  Loading GT point cloud from {panoptic_dir}...")
@@ -2469,12 +2939,12 @@ def run_multiview_inference(
                 depths=gt_depths,
                 image_names=image_names,
             )
-            
+
             if gt_pcd is not None:
                 # Save GT PLY too
                 gt_ply_path = output_path / f"{scene_name}_gt.ply"
                 gt_pcd.save_ply(str(gt_ply_path))
-                
+
                 # GT-only 3D visualization
                 viz_gt_path = output_path / f"{scene_name}_gt_3d.png"
                 visualize_panoptic_pointcloud(
@@ -2482,15 +2952,15 @@ def run_multiview_inference(
                     title=f"Ground Truth Panoptic Point Cloud: {scene_name}",
                     class_names=class_names,
                 )
-        
-        # 3. Side-by-side pred vs GT comparison (3D)
+
+        # 5. Side-by-side pred vs GT comparison (3D)
         viz_compare_path = output_path / f"{scene_name}_pred_vs_gt_3d.png"
         visualize_prediction_vs_gt(
             pcd, gt_pcd, str(viz_compare_path),
             class_names=class_names,
         )
-        
-        # 4. Per-view 2D overlay visualization (direct 2D masks, not 3D reprojection)
+
+        # 6. Per-view 2D overlay visualization (direct 2D masks, not 3D reprojection)
         viz_2d_path = output_path / f"{scene_name}_2d_views.png"
         try:
             visualize_2d_panoptic_views(
@@ -2505,13 +2975,24 @@ def run_multiview_inference(
             import traceback
             print(f"  [VIZ] ERROR in 2D visualization: {e}")
             traceback.print_exc()
-        
+
         print(f"\n=== Visualization Complete ===")
-        print(f"  3D prediction:        {viz_pred_path}")
+        print(f"  PLY files:")
+        print(f"    RGB point cloud:          {rgb_ply}")
+        print(f"    Semantic point cloud:      {sem_ply}")
+        print(f"    Blended point cloud:       {blend_ply}")
+        print(f"  PNG visualizations:")
+        print(f"    3D prediction (panels):    {viz_pred_path}")
+        print(f"    RGB vs Semantic:           {viz_rgb_sem_path}")
+        print(f"    Blended overlay (4 views): {viz_blend_path}")
         if gt_pcd is not None:
-            print(f"  3D ground truth:      {output_path / f'{scene_name}_gt_3d.png'}")
-        print(f"  3D pred vs GT:        {viz_compare_path}")
-        print(f"  2D per-view overlays: {viz_2d_path}")
+            print(f"    3D ground truth:           {output_path / f'{scene_name}_gt_3d.png'}")
+        print(f"    3D pred vs GT:             {viz_compare_path}")
+        print(f"    2D per-view overlays:      {viz_2d_path}")
+        print(f"")
+        print(f"  💡 To view PLY files interactively:")
+        print(f"    python -c \"import open3d as o3d; o3d.visualization.draw_geometries([o3d.io.read_point_cloud('{rgb_ply}')])\"")
+        print(f"    python -c \"import open3d as o3d; o3d.visualization.draw_geometries([o3d.io.read_point_cloud('{blend_ply}')])\"")
 
 
 if __name__ == "__main__":
@@ -2531,6 +3012,14 @@ if __name__ == "__main__":
                         help="Minimum camera distance for view selection (meters, default 0.3)")
     parser.add_argument("--max-distance", type=float, default=2.0,
                         help="Maximum camera distance for view selection (meters, default 2.0)")
+    parser.add_argument("--voxel-size", type=float, default=0.02,
+                        help="Voxel grid size in metres for point dedup/voting (default 0.02)")
+    parser.add_argument("--ref-view-weight", type=float, default=1.5,
+                        help="Multiplicative weight boost for reference-view points in voxel "
+                             "voting. Reference view uses learned queries and is typically more "
+                             "reliable. Set 1.0 to disable. (default 1.5)")
+    parser.add_argument("--confidence-threshold", type=float, default=0.5,
+                        help="Minimum MapAnything confidence to keep a point (default 0.5)")
     args = parser.parse_args()
     
     model, cfg = load_multiview_model(args.model, args.config)
@@ -2545,4 +3034,7 @@ if __name__ == "__main__":
         mask_threshold=args.mask_threshold,
         min_distance=args.min_distance,
         max_distance=args.max_distance,
+        voxel_size=args.voxel_size,
+        ref_view_weight=args.ref_view_weight,
+        confidence_threshold=args.confidence_threshold,
     )

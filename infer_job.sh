@@ -73,12 +73,15 @@ export SPLIT_DIR=${SCANNETPP_ROOT}/splits
 
 python m2f_inference.py \
     --scene ${SCANNETPP_ROOT}/data/2e74812d00 \
-    --model  output_multiview_pret40/model_final.pth \
+    --model  output_multiview_transfer_impv/model_0029999.pth \
     --config configs/scannetpp/panoptic-segmentation/ma40.yaml \
-    --num-views 3 \
     --output output_inference \
     --panoptic-dir ${SCANNETPP_ROOT}/panoptic \
-    --mask-threshold 0.3
+    --num-views 3 \
+    --voxel-size 0.01 \
+    --confidence-threshold 0.6 \
+    --mask-threshold 0.6 \
+    --ref-view-weight 1.5
 
 echo ""
 echo "Training completed at $(date)"

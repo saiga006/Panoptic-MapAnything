@@ -1,11 +1,23 @@
 # Multi-View Panoptic Segmentation on ScanNet++ with Query Propagation
 # 
-# This config uses:
+# Configuration for: 8 × NVIDIA A40 (48GB each)
+#
+# Architecture:
 # - MapAnything backbone (frozen) for multi-view feature extraction
 # - Panoptic DPT head (trainable) for FPN-style features
 # - Mask2Former with Query Propagation (trainable) for panoptic prediction
 #
-# Training with 4 views per scene, query propagation from reference to targets
+# IMPORTANT: IMS_PER_BATCH in this codebase is PER-GPU (not total).
+# The custom build_train_loader() passes IMS_PER_BATCH directly as
+# batch_size to PyTorch DataLoader, unlike standard detectron2 which
+# divides by num_gpus. Each scene loads NUM_VIEWS images.
+#
+# Per-GPU memory budget (A40 48GB, AMP enabled):
+#   1 scene × 3 views × ~6GB/view ≈ 18GB  → Safe (leaves 30GB headroom)
+#   2 scenes × 3 views × ~6GB/view ≈ 36GB → Tight but feasible
+#
+# Effective batch size = IMS_PER_BATCH × num_gpus = 1 × 8 = 8 scenes/step
+# Effective images    = 8 scenes × 3 views = 24 images/step
 
 _BASE_: Base-ScanNetPP-PanopticSegmentation.yaml
 
@@ -24,7 +36,7 @@ MODEL:
   MULTIVIEW:
     NUM_VIEWS: 3              # Number of views per scene
     USE_POSES: True           # Use camera poses in MapAnything
-    WARMUP_ITER: 5000          # Train views independently before query propagation
+    WARMUP_ITER: 2500          # Train views independently before query propagation
     
     # View selection parameters — OVERLAP-AWARE for query propagation
     # Views need 50-70% visual overlap so warped attention masks are meaningful.
@@ -130,43 +142,49 @@ INPUT:
   DATASET_MAPPER_NAME: "scannetpp_multiview"
 
 # ========================================
-# TRAINING SCHEDULE
+# TRAINING SCHEDULE (8 × A40 48GB)
 # ========================================
+#
+# CRITICAL: IMS_PER_BATCH is PER-GPU in this codebase (custom build_train_loader).
+# Standard detectron2 divides by num_gpus, but our custom DataLoader does NOT.
+#
+# Per-step computation:
+#   Per GPU:  IMS_PER_BATCH scenes × NUM_VIEWS views = 1 × 3 = 3 images
+#   Total:    1 scene/GPU × 8 GPUs = 8 scenes/step (24 images)
+#
+# Training duration:
+#   Dataset: 150 train scenes
+#   Epochs:  22500 iter × 8 scenes/iter = 180k scene-iterations = 1200 epochs
+#   This matches standard Mask2Former training on COCO (~300k iter, BS=16)
+#
 SOLVER:
-  # Memory-optimized: 4 scenes total, 0.5 per GPU (gradient accumulation effective)
-  # Each GPU processes 1 scene with 3 views, but only 4 GPUs active per step
-  # This reduces peak memory vs IMS_PER_BATCH: 8
-  IMS_PER_BATCH: 4            # 4 scenes total (fits in A40 48GB memory)
-  BASE_LR: 0.00005             # Restored to 1e-4 (matches working single-view). 3e-5 was too low to escape mask collapse.
-  DPT_LR: 0.00001             # 10x lower than BASE_LR for pretrained DPT weights
-  MAX_ITER: 45000             # 90000 / 4 = 22500 iterations
+  IMS_PER_BATCH: 4            # 1 scene PER GPU (= 3 images with NUM_VIEWS=3)
+                              # Effective batch: 1 × 8 GPUs = 8 scenes/step (24 images)
+  BASE_LR: 0.0001             # 1e-4 — standard for effective batch size 8 scenes
+  DPT_LR: 0.00001             # 1e-5 — 10x lower for pretrained DPT weights
+  MAX_ITER: 11250             # 22.5k iter × 8 scenes/iter = 180k scene-iterations
   
   # Learning rate schedule
-  STEPS: (30000, 40000)       # Decay at 2/3 and ~90% of training
+  STEPS: (6500, 10000)       # Decay at 67% and 89% of training
   WARMUP_FACTOR: 0.001
-  WARMUP_ITERS: 1000          # Full warmup for stable 1e-4 LR ramp-up
+  WARMUP_ITERS: 1000          # Warm up LR from 1e-7 → 1e-4 over 1000 iters
   
   # Gradient clipping for stability
   CLIP_GRADIENTS:
     ENABLED: True
     CLIP_TYPE: "norm"
-    CLIP_VALUE: 5.0           # Standard Mask2Former value. 3.0 saturated every step killing mask_embed gradient signal.
+    CLIP_VALUE: 5.0           # Standard Mask2Former value
     NORM_TYPE: 2.0
   
-  CHECKPOINT_PERIOD: 1500
+  CHECKPOINT_PERIOD: 2000     # Save every 2.5k iter (~20k scenes between saves)
 
 DATALOADER:
-  NUM_WORKERS: 4              # Reduce to save CPU memory
+  NUM_WORKERS: 8              # 4 workers per GPU (32 CPUs / 8 GPUs = 4 per GPU)
 
 TEST:
-  EVAL_PERIOD: 0           # Disabled to prevent crash due to missing merged GT JSON
+  EVAL_PERIOD: 0              # Disabled (missing merged GT JSON causes crash)
   DETECTIONS_PER_IMAGE: 100
 
-OUTPUT_DIR: "./output_multiview_4a40"
+OUTPUT_DIR: "./output_multiview_8mlsp0"
 
-# ========================================
-# AMP (Mixed Precision)
-# ========================================
-# SOLVER:
-#   AMP:
-#     ENABLED: False
+# AMP is force-enabled in setup_cfg() — no need to set here

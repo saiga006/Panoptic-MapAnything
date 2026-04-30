@@ -2,9 +2,9 @@
 #SBATCH --job-name=panoptic_train_sp  # Job name
 #SBATCH --partition=gpu4            # Partition: 'gpu4' (A100) or 'gpu' (V100)
 #SBATCH --nodes=1                  # Number of nodes
-#SBATCH --cpus-per-task=32         # CPU cores per task (adjust based on availability)
+#SBATCH --cpus-per-task=64         # CPU cores per task (adjust based on availability)
 #SBATCH --mem=185G                 # Memory per node
-#SBATCH --gres=gpu:1               # Number of GPUs per node (1-4 for gpu4, 1-4 for gpu)
+#SBATCH --gres=gpu:4               # Number of GPUs per node (1-4 for gpu4, 1-4 for gpu)
 #SBATCH --time=16:00:00            # Time limit hrs:min:sec
 #SBATCH --output=slurm_%j.out      # Standard output log
 #SBATCH --error=slurm_%j.err       # Standard error log
@@ -72,14 +72,14 @@ export PANOPTIC_VAL_ROOT=${SCANNETPP_ROOT}/panoptic_val
 export SPLIT_DIR=${SCANNETPP_ROOT}/splits
 
 python3 m2f_train_multiview.py \
-    --num-gpus 1 \
-    --config-file configs/scannetpp/panoptic-segmentation/ma40.yaml \
+    --num-gpus 4 \
+    --config-file configs/scannetpp/panoptic-segmentation/ma40_8gpu.yaml \
     --num-classes 2878 \
     --scannetpp-root $SCANNETPP_ROOT \
     --panoptic-root $PANOPTIC_ROOT \
     --split-dir $SPLIT_DIR \
-    --pretrained-single-view output_cluster/model_final.pth \
-    OUTPUT_DIR output_multiview_pret40
+    --pretrained-single-view ${MASK2FORMER_ROOT}/output_cluster/model_final.pth \
+    OUTPUT_DIR output_multiview_transfer_multigpu_ver2
 
 echo ""
 echo "Training completed at $(date)"
