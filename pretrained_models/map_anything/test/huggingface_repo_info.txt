@@ -1,0 +1,2 @@
+https://huggingface.co/facebook/map-anything/tree/6f3a25bfbb8fcc799176bb01e9d07dfb49d5416a
+to download the pretrained map-anything model
