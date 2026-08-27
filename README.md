@@ -75,6 +75,7 @@ The model's performance is measured using the standard COCO Panoptic Evaluator, 
 │   └── Panoptic_MapAnything_PLR_Lab_Report.pdf
 ├── LICENSE
 └── README.md
+```
 
 ## Acknowledgement
 
@@ -87,7 +88,12 @@ This project was done as part of Uni Bonn Coursework, **Perception and Learning 
 
 ## Code
 
-**Will be updated later at the end of April 26'**
+Code was updated on top of Mask2former repo and pretrained MapAnything Model downloaded from HuggingFace repository.
+Refer following repos for training setup.
+1. https://github.com/facebookresearch/Mask2Former/tree/main
+2. https://github.com/facebookresearch/map-anythaing/tree/main
+3. https://huggingface.co/facebook/map-anything
+4. https://github.com/facebookresearch/Mask2Former/blob/main/datasets/README.md
 
 ## References
 
