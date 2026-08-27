@@ -5,7 +5,7 @@ inference_test_output
 
 
 *.png
-*.json
+#*.json
 *.diff
 *.jpg
 !/projects/DensePose/doc/images/*.jpg
@@ -67,7 +67,7 @@ _darcs
 *.h5
 *.pb
 *.weights
-pretrained_models/
+pretrained_models/*/*/model.safetensors
 checkpoints/
 model_zoo/
 saved_models/
